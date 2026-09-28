@@ -237,6 +237,68 @@ class CodexConversationParser {
   }
 }
 
+enum CodexMessageRoute { steer, queue }
+
+class CodexPendingMessage {
+  final String text;
+  CodexMessageRoute route;
+  final int occurrence;
+  final DateTime timestamp = DateTime.now();
+  bool queued;
+
+  CodexPendingMessage(this.text, this.occurrence,
+      {required this.queued, required this.route});
+}
+
+/// 正在发送或等待远程日志确认的消息，生命周期独立于查看窗口。
+class CodexPendingMessages extends ChangeNotifier {
+  final List<CodexPendingMessage> _messages = [];
+
+  List<CodexPendingMessage> get messages => List.unmodifiable(_messages);
+
+  bool get isNotEmpty => _messages.isNotEmpty;
+
+  int _occurrences(List<CodexConversationRecord> records, String text) => records
+      .where((record) => record.kind == 'user' && record.text.trim() == text.trim())
+      .length;
+
+  int nextOccurrence(List<CodexConversationRecord> records, String text) {
+    var count = _occurrences(records, text);
+    for (final message in _messages) {
+      if (message.text.trim() == text.trim() && message.occurrence > count) {
+        count = message.occurrence;
+      }
+    }
+    return count + 1;
+  }
+
+  CodexPendingMessage add(String text, int occurrence,
+      {bool queued = true, CodexMessageRoute route = CodexMessageRoute.queue}) {
+    final message = CodexPendingMessage(text, occurrence, queued: queued, route: route);
+    _messages.add(message);
+    notifyListeners();
+    return message;
+  }
+
+  void markQueued(CodexPendingMessage message, {CodexMessageRoute? route}) {
+    if (!_messages.contains(message)) return;
+    if (route != null) message.route = route;
+    message.queued = true;
+    notifyListeners();
+  }
+
+  void remove(CodexPendingMessage message) {
+    if (_messages.remove(message)) notifyListeners();
+  }
+
+  void reconcile(List<CodexConversationRecord> records) {
+    final before = _messages.length;
+    _messages.removeWhere((message) =>
+        _occurrences(records, message.text) >= message.occurrence);
+    if (_messages.length != before) notifyListeners();
+  }
+}
+
 /// 查询和接管远端 Codex 会话。
 class CodexSessionService {
   static final LinkedHashMap<String, List<CodexConversation>> _conversationCache =
@@ -248,6 +310,13 @@ class CodexSessionService {
   static final Map<String, Future<List<CodexConversation>>> _conversationLoads = {};
   static final Map<String, Future<List<CodexConversation>>> _runningConversationLoads = {};
   static final Map<String, Future<List<CodexConversationRecord>>> _recordLoads = {};
+
+  static final Map<String, CodexPendingMessages> _pendingMessages = {};
+
+  static CodexPendingMessages pendingMessages(
+          String connectionId, String conversationId) =>
+      _pendingMessages.putIfAbsent(_recordKey(connectionId, conversationId),
+          CodexPendingMessages.new);
 
   @visibleForTesting
   static Future<String> Function(
@@ -270,6 +339,7 @@ class CodexSessionService {
       _conversationCache.clear();
       _runningConversationCache.clear();
       _recordCache.clear();
+      _pendingMessages.clear();
       _conversationLoads.clear();
       _runningConversationLoads.clear();
       _recordLoads.clear();
@@ -281,6 +351,7 @@ class CodexSessionService {
     _runningConversationLoads.remove(connectionId);
     final prefix = '$connectionId\u0000';
     _recordCache.removeWhere((key, _) => key.startsWith(prefix));
+    _pendingMessages.removeWhere((key, _) => key.startsWith(prefix));
     _recordLoads.removeWhere((key, _) => key.startsWith(prefix));
   }
 
@@ -291,6 +362,45 @@ class CodexSessionService {
     return value == null
         ? null
         : CodexGoal.fromJson(Map<String, dynamic>.from(value as Map));
+  }
+
+  /// Query fresh remote state for each send; never route from the viewer snapshot.
+  static Future<CodexMessageRoute> sendMessage(
+    String connectionId,
+    String conversationId,
+    String message,
+  ) async {
+    if (conversationId.trim().isEmpty || message.trim().isEmpty) {
+      throw ArgumentError('对话 ID 和消息不能为空');
+    }
+    final conversation = await findById(connectionId, conversationId);
+    if (conversation == null) throw StateError('远端找不到这个 Codex 对话');
+    if (conversation.isSubagent) throw StateError('不能直接向子代理对话发送消息');
+    if (conversation.state == CodexConversationState.unknown) {
+      throw StateError('无法确认远端运行状态，本次未发送');
+    }
+    final running = conversation.state == CodexConversationState.running ||
+        (conversation.state == CodexConversationState.pending &&
+            conversation.writerLocked);
+    if (running) {
+      await steerMessage(connectionId, conversationId, message);
+      return CodexMessageRoute.steer;
+    }
+    await queueMessage(connectionId, conversationId, message);
+    return CodexMessageRoute.queue;
+  }
+
+  static Future<void> steerMessage(
+    String connectionId,
+    String conversationId,
+    String message,
+  ) async {
+    if (conversationId.trim().isEmpty || message.trim().isEmpty) {
+      throw ArgumentError('对话 ID 和消息不能为空');
+    }
+    final script = await rootBundle.loadString('assets/codex_steer_message.py');
+    await _runPython(connectionId, script, [conversationId, message],
+        allowReconnect: false);
   }
 
   static Future<void> queueMessage(

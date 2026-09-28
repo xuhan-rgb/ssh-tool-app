@@ -2923,13 +2923,13 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
 class CodexConversationViewerDialog extends StatefulWidget {
   final String connectionId;
   final CodexConversation conversation;
-  final Future<void> Function(String message)? queueMessage;
+  final Future<CodexMessageRoute> Function(String message)? sendMessage;
   final Future<List<CodexConversationRecord>> Function(String conversationId)
       loadRecords;
 
   const CodexConversationViewerDialog({
     this.connectionId = '',
-    this.queueMessage,
+    this.sendMessage,
     required this.conversation,
     required this.loadRecords,
   });
@@ -2950,38 +2950,43 @@ class _CodexConversationViewerDialogState
   String? _error;
   final _messageController = TextEditingController();
   bool _sendingMessage = false;
-  String? _sendStatus;
   String? _sendError;
-  String? _queuedMessage;
-  int _queuedMessageOccurrences = 0;
+  late final CodexPendingMessages _pendingMessages;
 
-  int _messageOccurrences(List<CodexConversationRecord> records, String message) =>
-      records.where((record) => record.kind == 'user' && record.text == message).length;
+  void _pendingMessagesChanged() {
+    setState(() {});
+    if (_pendingMessages.isNotEmpty) {
+      _startRefreshing();
+      unawaited(_loadRecords(quiet: true));
+    }
+  }
+
+  void _startRefreshing() {
+    if (_refreshTimer?.isActive == true) return;
+    _refreshTimer = Timer.periodic(const Duration(seconds: 2),
+        (_) => unawaited(_loadRecords(quiet: true)));
+  }
 
   Future<void> _sendRemoteMessage() async {
     final message = _messageController.text;
     if (_sendingMessage || message.trim().isEmpty) return;
+    final pending = _pendingMessages.add(message,
+        _pendingMessages.nextOccurrence(_records, message),
+        queued: false, route: CodexMessageRoute.steer);
     setState(() {
       _sendingMessage = true;
       _sendError = null;
-      _sendStatus = null;
     });
     try {
-      await (widget.queueMessage?.call(message) ??
-          CodexSessionService.queueMessage(
+      final route = await (widget.sendMessage?.call(message) ??
+          CodexSessionService.sendMessage(
               widget.connectionId, widget.conversation.id, message));
+      // 发送完成时窗口可能已关闭；仍需让重开的窗口收到队列状态。
+      _pendingMessages.markQueued(pending, route: route);
       if (!mounted) return;
-      setState(() {
-        _messageController.clear();
-        _sendStatus = '已发送到远程队列';
-        _queuedMessage = message;
-        _queuedMessageOccurrences = _messageOccurrences(_records, message);
-      });
-      _refreshTimer?.cancel();
-      _refreshTimer = Timer.periodic(const Duration(seconds: 2),
-          (_) => unawaited(_loadRecords(quiet: true)));
-      unawaited(_loadRecords(quiet: true));
+      setState(() => _messageController.clear());
     } catch (error) {
+      _pendingMessages.remove(pending);
       if (mounted) setState(() => _sendError = '发送失败：$error');
     } finally {
       if (mounted) setState(() => _sendingMessage = false);
@@ -2995,18 +3000,20 @@ class _CodexConversationViewerDialogState
     _records = CodexSessionService.cachedRecords(
             widget.connectionId, widget.conversation.id) ??
         const [];
-    unawaited(_loadRecords());
-    if (widget.conversation.state == CodexConversationState.running ||
+    _pendingMessages = CodexSessionService.pendingMessages(
+        widget.connectionId, widget.conversation.id);
+    _pendingMessages.addListener(_pendingMessagesChanged);
+    if (_pendingMessages.isNotEmpty ||
+        widget.conversation.state == CodexConversationState.running ||
         widget.conversation.state == CodexConversationState.pending) {
-      _refreshTimer = Timer.periodic(
-        const Duration(seconds: 2),
-        (_) => unawaited(_loadRecords(quiet: true)),
-      );
+      _startRefreshing();
     }
+    unawaited(_loadRecords());
   }
 
   @override
   void dispose() {
+    _pendingMessages.removeListener(_pendingMessagesChanged);
     _refreshTimer?.cancel();
     _messageController.dispose();
     super.dispose();
@@ -3025,11 +3032,8 @@ class _CodexConversationViewerDialogState
       final records = await widget.loadRecords(widget.conversation.id);
       if (!mounted) return;
       final lastKind = records.isEmpty ? null : records.last.kind;
-      if (_queuedMessage != null &&
-          _messageOccurrences(records, _queuedMessage!) > _queuedMessageOccurrences) {
-        _queuedMessage = null;
-      }
-      if (_queuedMessage == null &&
+      _pendingMessages.reconcile(records);
+      if (!_pendingMessages.isNotEmpty &&
           (lastKind == 'task_complete' || lastKind == 'turn_aborted')) {
         _refreshTimer?.cancel();
       }
@@ -3116,7 +3120,7 @@ class _CodexConversationViewerDialogState
         !text.startsWith('# AGENTS.md instructions');
   }
 
-  Widget _buildRecord(CodexConversationRecord record) {
+  Widget _buildRecord(CodexConversationRecord record, {String? sendStatus}) {
     final color = _kindColor(record.kind);
     final isMessage = record.kind == 'user' || record.kind == 'assistant';
     return Align(
@@ -3138,6 +3142,12 @@ class _CodexConversationViewerDialogState
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              if (sendStatus != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 5),
+                  child: Text(sendStatus,
+                      style: TextStyle(color: AppTheme.textMuted, fontSize: 11)),
+                ),
               Row(
                 children: [
                   Text(
@@ -3186,6 +3196,7 @@ class _CodexConversationViewerDialogState
   }
 
   Widget _buildViewerContent() {
+    final pending = _pendingMessages.messages;
     final visibleRecords = _showFullLog
         ? _records
         : _records.where(_isConversationMessage).toList();
@@ -3196,7 +3207,7 @@ class _CodexConversationViewerDialogState
           children: [
             Expanded(
               child: Text(
-                '${_queuedMessage != null ? '等待远程处理' : (_observedState ?? widget.conversation.state).label}  ·  ${widget.conversation.id}',
+                '${_pendingMessages.isNotEmpty ? '等待远程处理' : (_observedState ?? widget.conversation.state).label}  ·  ${widget.conversation.id}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -3220,11 +3231,11 @@ class _CodexConversationViewerDialogState
           ),
         const SizedBox(height: 10),
         Expanded(
-          child: _loading && _records.isEmpty
+          child: _loading && _records.isEmpty && pending.isEmpty
               ? Center(
                   child: CircularProgressIndicator(color: AppTheme.blue),
                 )
-              : _error != null && _records.isEmpty
+              : _error != null && _records.isEmpty && pending.isEmpty
                   ? Center(
                       child: Text(
                         '读取远程对话失败：$_error',
@@ -3235,7 +3246,7 @@ class _CodexConversationViewerDialogState
                         ),
                       ),
                     )
-                  : visibleRecords.isEmpty
+                  : visibleRecords.isEmpty && pending.isEmpty
                       ? Center(
                           child: Text(
                             _records.isEmpty ? '远程记录为空' : '没有可显示的文字对话，可查看完整日志',
@@ -3247,21 +3258,33 @@ class _CodexConversationViewerDialogState
                         )
                       : ListView.builder(
                           reverse: true,
-                          itemCount: visibleRecords.length,
-                          itemBuilder: (context, index) => _buildRecord(
-                              visibleRecords[
-                                  visibleRecords.length - 1 - index]),
+                          itemCount: visibleRecords.length + pending.length,
+                          itemBuilder: (context, index) {
+                            if (index < pending.length) {
+                              final message = pending[pending.length - 1 - index];
+                              return _buildRecord(
+                                CodexConversationRecord(kind: 'user',
+                                    timestamp: message.timestamp, text: message.text),
+                                sendStatus: !message.queued ? '发送中…'
+                                    : message.route == CodexMessageRoute.steer
+                                        ? '已提交 Steer · 等待 Codex 接收'
+                                        : '已发送到远程队列',
+                              );
+                            }
+                            return _buildRecord(visibleRecords[
+                                visibleRecords.length - 1 - (index - pending.length)]);
+                          },
                         ),
         ),
         if (!widget.conversation.isSubagent &&
-            (widget.connectionId.isNotEmpty || widget.queueMessage != null)) ...[
+            (widget.connectionId.isNotEmpty || widget.sendMessage != null)) ...[
           const SizedBox(height: 8),
-          if (_sendError != null || _sendStatus != null)
+          if (_sendError != null)
             Padding(
               padding: const EdgeInsets.only(bottom: 6),
-              child: Text(_sendError ?? _sendStatus!,
+              child: Text(_sendError!,
                   style: TextStyle(fontSize: 12,
-                      color: _sendError == null ? AppTheme.green : AppTheme.red)),
+                      color: AppTheme.red)),
             ),
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,
