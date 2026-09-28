@@ -15,7 +15,7 @@
 
 本项目使用 Flutter 3.38.6 和其捆绑的 Dart。Android 构建验证环境为 JDK 17、Android Gradle Plugin 8.9.1 和 Gradle 8.12。Android 的 `compileSdk` 与 NDK 版本沿用 Flutter 默认值；首次构建会由 Flutter/Gradle 下载所需组件。首次构建前需安装 Android SDK Command-line Tools 并接受 Android SDK 许可证。
 
-连接目标主机需要可用的 SSH 服务。tmux 工作区需要远端安装 `tmux`；Codex 对话功能需要远端安装并完成认证的 Codex CLI，SSH 登录账号还需要有权读取对应的 Codex 会话数据。排队发送和 Goal 读取取决于远端 CLI 版本及其功能，并非所有 Codex 安装都支持。
+连接目标主机需要可用的 SSH 服务。tmux 工作区需要远端安装 `tmux`；Codex 对话功能需要远端安装 Python 3，以及已完成认证的 Codex CLI，SSH 登录账号还需要有权读取对应的 Codex 会话数据。排队发送和 Goal 读取取决于远端 CLI 版本及其功能，并非所有 Codex 安装都支持。
 
 主要目录：
 
@@ -170,7 +170,7 @@ bash scripts/build_dmg_macos.sh
 
 ## 测试
 
-当前验证范围：主代理已从不含本机 Flutter 缓存与 Android 配置的干净源码副本成功构建 Android Debug APK。本次没有构建 Linux 或 macOS 版本。
+当前验证范围：已从不含 `.dart_tool/`、`build/` 和 `android/local.properties` 的干净源码副本成功构建 Android Debug APK。验证使用已有 Docker 镜像及 SDK、依赖下载缓存，未重新构建镜像；本次没有构建 Linux 或 macOS 版本。
 
 运行 Flutter/Dart 测试：
 
