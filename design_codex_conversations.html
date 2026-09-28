@@ -1,0 +1,285 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>选择 Codex 对话 · 目录折叠演示</title>
+  <style>
+    :root { color-scheme: dark; --bg:#0f141b; --panel:#171f2b; --line:#2b394c; --text:#e7edf7; --muted:#92a2b9; --subtle:#63748e; --blue:#58a6ff; --cyan:#39d4e0; --orange:#d29922; --green:#3fb950; }
+    * { box-sizing:border-box; }
+    [hidden] { display:none !important; }
+    body { margin:0; min-height:100vh; background:#0a0e14; color:var(--text); font:14px system-ui,-apple-system,"Noto Sans CJK SC",sans-serif; }
+    button,select { font:inherit; }
+    button { cursor:pointer; }
+    .app { display:flex; flex-direction:column; width:min(100%,720px); min-height:100vh; margin:auto; background:var(--bg); border-inline:1px solid var(--line); }
+    header { display:flex; align-items:center; gap:12px; min-height:56px; padding:0 16px; background:var(--panel); border-bottom:1px solid var(--line); }
+    header strong { flex:1; font-size:16px; }
+    .back { border:0; background:transparent; color:var(--text); font-size:22px; padding:4px; }
+    .mode { border:1px solid var(--line); border-radius:7px; background:#111923; color:var(--text); padding:7px 9px; }
+    .tabs { display:flex; gap:6px; padding:8px 12px; border-bottom:1px solid var(--line); }
+    .tab { flex:1; border:0; border-radius:7px; background:transparent; color:var(--muted); padding:9px 4px; }
+    .tab.active { background:#20344d; color:var(--blue); font-weight:600; }
+    main { flex:1; min-height:0; padding:0 14px 92px; }
+    .toolbar { display:flex; align-items:center; gap:9px; min-height:53px; border-bottom:2px solid #456e9b; }
+    .toolbar strong { white-space:nowrap; font-size:13px; }
+    .count { color:var(--subtle); font-size:12px; }
+    .spacer { flex:1; }
+    .tool { border:0; background:transparent; color:var(--muted); padding:7px 2px; font-size:12px; white-space:nowrap; }
+    .tool:hover { color:var(--blue); }
+    .branch { border-bottom:1px solid rgba(43,57,76,.68); }
+    details { margin:0; }
+    summary { display:flex; align-items:center; gap:7px; min-height:39px; list-style:none; cursor:pointer; color:var(--text); font-size:12px; font-weight:600; }
+    summary::-webkit-details-marker { display:none; }
+    summary::before { content:"▾"; color:var(--muted); width:12px; text-align:center; }
+    details:not([open]) > summary::before { content:"▸"; }
+    .folder { color:var(--cyan); font-size:15px; }
+    .folder-name { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .folder-count { color:var(--subtle); font-weight:400; }
+    .nested { margin-left:16px; padding-left:9px; border-left:1px solid var(--line); }
+    .conversation { display:flex; gap:9px; width:100%; min-height:76px; padding:9px 8px; border:1px solid transparent; border-radius:8px; background:transparent; color:var(--text); text-align:left; }
+    .conversation:hover { background:#1a2636; }
+    .conversation.selected { background:#20344d; border-color:#365d86; }
+    .bubble { width:16px; padding-top:1px; color:var(--green); }
+    .conversation-content { flex:1; min-width:0; }
+    .title-row { display:flex; align-items:center; gap:6px; }
+    .title { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
+    .state { flex:none; padding:2px 5px; border:1px solid currentColor; border-radius:4px; color:var(--green); font-size:10px; }
+    .state.running { color:var(--cyan); }
+    .state.pending { color:var(--orange); }
+    .meta,.preview { margin-top:4px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:11px; }
+    .meta { color:var(--subtle); font-family:ui-monospace,monospace; }
+    .star { align-self:flex-start; border:0; background:transparent; color:var(--subtle); font-size:21px; line-height:1; padding:0 2px; }
+    .star.active { color:var(--orange); }
+    .row-view { align-self:flex-start; border:0; background:transparent; color:var(--muted); font-size:17px; padding:0 2px; }
+    footer { position:sticky; bottom:0; display:flex; flex-direction:column; gap:8px; padding:12px 16px; background:var(--panel); border-top:1px solid var(--line); }
+    .footer-head { display:flex; align-items:center; gap:8px; min-height:24px; }
+    .footer-note { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--muted); font-size:12px; }
+    .footer-head button { border:0; background:transparent; color:var(--muted); padding:3px 5px; font-size:12px; }
+    .primary { border:0; border-radius:7px; background:var(--blue); color:#08121f; font-weight:700; padding:11px 16px; }
+    footer > .primary { width:100%; }
+    .secondary { border:1px solid var(--line); border-radius:7px; background:transparent; color:var(--muted); padding:9px 12px; }
+    .demo-note { margin:14px 0 0; color:var(--subtle); font-size:11px; }
+    .panel[hidden], .conversation[hidden], .branch[hidden], .directory-row[hidden] { display:none; }
+    .panel-heading { display:flex; align-items:center; gap:8px; padding:15px 0 10px; border-bottom:2px solid #456e9b; font-size:13px; font-weight:700; }
+    .panel-heading button { margin-left:auto; }
+    .opened-card,.directory-row { display:flex; align-items:center; gap:10px; width:100%; padding:12px 8px; border:1px solid var(--line); border-radius:8px; margin-top:10px; background:var(--panel); }
+    .opened-card .card-body,.directory-row .card-body { flex:1; min-width:0; }
+    .card-body strong,.card-body small { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .card-body small { margin-top:4px; color:var(--muted); }
+    .directory-row input { accent-color:var(--blue); width:17px; height:17px; }
+    .directory-row .star { align-self:center; }
+    .subheading { margin:18px 0 6px; color:var(--muted); font-size:12px; }
+    .more-menu { position:absolute; right:16px; bottom:100%; width:190px; padding:6px; border:1px solid var(--line); border-radius:9px; background:var(--panel); box-shadow:0 10px 30px #0008; }
+    .more-menu button { display:block; width:100%; padding:10px; border:0; border-radius:6px; background:transparent; color:var(--text); text-align:left; }
+    .more-menu button:hover { background:#22344a; }
+    .more-menu .danger { color:var(--orange); }
+    footer { position:sticky; }
+    .continue-row { display:flex; gap:8px; }
+    .continue-row .primary { flex:1; }
+    .continue-row .secondary { width:42px; padding:8px 0; font-size:20px; }
+    .danger { color:var(--orange); }
+    .dialog { border:1px solid var(--line); border-radius:12px; width:min(92vw,440px); padding:20px; background:var(--panel); color:var(--text); box-shadow:0 18px 70px #0009; }
+    .dialog::backdrop { background:#000a; }
+    .dialog h2 { margin:0 0 12px; font-size:17px; }
+    .dialog p { color:var(--muted); line-height:1.5; white-space:pre-line; }
+    .dialog menu { display:flex; justify-content:flex-end; gap:8px; padding:0; margin:18px 0 0; }
+    .dialog input { width:100%; padding:10px; background:var(--bg); border:1px solid var(--line); border-radius:6px; color:var(--text); }
+    .notice { position:fixed; left:50%; bottom:80px; transform:translateX(-50%); z-index:10; max-width:90vw; padding:10px 14px; border:1px solid var(--line); border-radius:8px; background:#20344d; color:var(--text); box-shadow:0 8px 28px #0007; }
+    .notice[hidden] { display:none; }
+    @media (max-width:480px) { .app { border:0; } .toolbar { gap:6px; } .tool { font-size:11px; } }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header>
+      <button class="back" aria-label="返回">‹</button>
+      <strong>选择 Codex 对话</strong>
+      <button class="tool" id="new" title="新建对话" aria-label="新建对话">＋</button>
+      <select class="mode" aria-label="打开方式"><option>文字聊天</option><option>终端</option></select>
+    </header>
+    <nav class="tabs" aria-label="页面"><button class="tab active" data-panel="conversations">◉ 对话</button><button class="tab" data-panel="opened">▣ 已打开</button><button class="tab" data-panel="directories">▤ 目录</button></nav>
+    <main>
+      <div class="panel" id="panel-conversations">
+      <div class="toolbar"><strong>远程 Codex 对话</strong><span class="count" id="visibleCount">4 条</span><span class="spacer"></span><select class="mode" id="timeFilter" aria-label="按时间筛选"><option value="all">全部时间</option><option value="today">今天</option><option value="yesterday">昨天</option><option value="week">近 7 天</option><option value="month">近 30 天</option></select><button class="tool refresh" title="手动刷新">↻</button></div>
+      <p class="demo-note">示例数据 · 点击目录折叠、筛选或收藏；远程操作仅演示交互</p>
+      <section class="branch" data-path="/home/qwer/Projects">
+        <details open>
+          <summary><span class="folder">▣</span><span class="folder-name" title="/home/qwer/Projects">home/qwer/Projects</span><span class="folder-count">3 条</span></summary>
+          <div class="nested">
+            <details open>
+              <summary><span class="folder">▣</span><span class="folder-name" title="/home/qwer/Projects/ssh_tool_app">ssh_tool_app</span><span class="folder-count">2 条</span></summary>
+              <div class="nested">
+                <div class="conversation" role="button" tabindex="0" data-id="01a09c3f" data-path="/home/qwer/Projects/ssh_tool_app" data-age="today" data-title="优化对话目录列表" data-opened="local" data-takeover="true"><span class="bubble">●</span><div class="conversation-content"><div class="title-row"><span class="title">优化对话目录列表</span><span class="state running">执行中</span></div><div class="meta">09-23 19:48 · 01a09c3f · 已打开</div><div class="preview">把左侧对话按照目录层级折叠显示…</div></div><button class="star active" aria-label="取消收藏">★</button></div>
+                <div class="conversation" role="button" tabindex="0" data-id="01a08d42" data-path="/home/qwer/Projects/ssh_tool_app" data-age="today" data-title="修复 Android 聊天切换"><span class="bubble">●</span><div class="conversation-content"><div class="title-row"><span class="title">修复 Android 聊天切换</span><span class="state">已完成</span></div><div class="meta">09-23 15:04 · 01a08d42</div><div class="preview">完成文字聊天和终端之间的切换。</div></div><button class="star" aria-label="收藏">☆</button></div>
+              </div>
+            </details>
+            <details open>
+              <summary><span class="folder">▣</span><span class="folder-name" title="/home/qwer/Projects/website/src">website/src</span><span class="folder-count">1 条</span></summary>
+              <div class="nested"><div class="conversation" role="button" tabindex="0" data-id="01a06b15" data-path="/home/qwer/Projects/website/src" data-age="yesterday" data-title="检查网页首页"><span class="bubble">●</span><div class="conversation-content"><div class="title-row"><span class="title">检查网页首页</span><span class="state">已完成</span></div><div class="meta">09-22 21:13 · 01a06b15</div><div class="preview">确认首页布局和导航交互。</div></div><button class="star" aria-label="收藏">☆</button></div></div>
+            </details>
+          </div>
+        </details>
+      </section>
+      <section class="branch" data-path="/mnt/data/dev-scripts"><details open><summary><span class="folder">▣</span><span class="folder-name" title="/mnt/data/dev-scripts">mnt/data/dev-scripts</span><span class="folder-count">1 条</span></summary><div class="nested"><div class="conversation" role="button" tabindex="0" data-id="01a05e7a" data-path="/mnt/data/dev-scripts" data-age="week" data-title="整理开发脚本"><span class="bubble">●</span><div class="conversation-content"><div class="title-row"><span class="title">整理开发脚本</span><span class="state pending">末轮未完成</span></div><div class="meta">09-21 18:42 · 01a05e7a</div><div class="preview">检查现有脚本并列出可合并项。</div></div><button class="star" aria-label="收藏">☆</button></div></div></details></section>
+      <p class="demo-note" id="emptyConversations" hidden>筛选后没有符合条件的对话。</p>
+      </div>
+      <div class="panel" id="panel-opened" hidden>
+        <div class="panel-heading">已打开的会话 · <span id="openedCount">1</span><button class="tool refresh" title="刷新已打开的对话">↻</button></div>
+        <p class="demo-note">示例：已打开的对话保留在远端 tmux 中。</p>
+        <div class="opened-card" data-id="01a09c3f"><span class="folder">⌘</span><div class="card-body"><strong>优化对话目录列表</strong><small>/home/qwer/Projects/ssh_tool_app · 正在执行</small></div><button class="secondary" id="chooseOpened">选择</button></div>
+      </div>
+      <div class="panel" id="panel-directories" hidden>
+        <div class="panel-heading">对话目录 · <span id="directoryFilterCount">全部</span><button class="tool" id="clearDirectories">清除筛选</button></div>
+        <p class="demo-note">勾选目录筛选对话，包含子目录；星标仅收藏目录。</p>
+        <div class="subheading">目录树</div>
+        <div class="directory-row"><input type="checkbox" value="/home/qwer/Projects" aria-label="筛选 Projects"><div class="card-body"><strong>home/qwer/Projects</strong><small>3 条 · 包含下级目录</small></div><button class="star" aria-label="收藏目录">☆</button></div>
+        <div class="directory-row" style="margin-left:16px"><input type="checkbox" value="/home/qwer/Projects/ssh_tool_app" aria-label="筛选 ssh_tool_app"><div class="card-body"><strong>└ ssh_tool_app</strong><small>2 条</small></div><button class="star" aria-label="收藏目录">☆</button></div>
+        <div class="directory-row" style="margin-left:16px"><input type="checkbox" value="/home/qwer/Projects/website/src" aria-label="筛选 website/src"><div class="card-body"><strong>└ website/src</strong><small>1 条</small></div><button class="star" aria-label="收藏目录">☆</button></div>
+        <div class="directory-row"><input type="checkbox" value="/mnt/data/dev-scripts" aria-label="筛选 dev-scripts"><div class="card-body"><strong>mnt/data/dev-scripts</strong><small>1 条</small></div><button class="star" aria-label="收藏目录">☆</button></div>
+      </div>
+    </main>
+    <footer id="actions"><div class="footer-head"><span class="footer-note" id="selection">未选择对话</span></div><div class="continue-row"><button class="primary" id="open">新建对话</button><button class="secondary" id="more" title="更多操作" aria-label="更多操作" hidden>⋯</button></div><div class="more-menu" id="moreMenu" hidden><button id="fork">Fork 副本</button><button class="danger" id="kill">Kill 并恢复</button></div></footer>
+  </div>
+  <dialog class="dialog" id="modal"><h2 id="modalTitle"></h2><p id="modalText"></p><input id="modalInput" hidden aria-label="会话名称"><menu><button class="secondary" id="modalCancel">取消</button><button class="primary" id="modalConfirm">确认</button></menu></dialog>
+  <div class="notice" id="notice" role="status" hidden></div>
+  <script>
+    const $ = selector => document.querySelector(selector);
+    const $$ = selector => [...document.querySelectorAll(selector)];
+    let selected = null;
+    let onConfirm = null;
+    let noticeTimer;
+
+    function notice(message) {
+      const element = $('#notice');
+      element.textContent = message;
+      element.hidden = false;
+      clearTimeout(noticeTimer);
+      noticeTimer = setTimeout(() => element.hidden = true, 3000);
+    }
+
+    function modal(title, message, confirm, input = false) {
+      $('#modalTitle').textContent = title;
+      $('#modalText').textContent = message;
+      $('#modalInput').hidden = !input;
+      $('#modalInput').value = '';
+      $('#modalConfirm').textContent = input ? '创建' : '确认';
+      onConfirm = confirm;
+      $('#modal').showModal();
+      if (input) $('#modalInput').focus();
+    }
+
+    function updateActions() {
+      $('#selection').textContent = selected
+        ? `${selected.dataset.opened === 'local' ? '本地已打开' : '远程历史'} · ${selected.dataset.title}`
+        : '未选择对话';
+      $('#more').hidden = !selected || selected.dataset.takeover !== 'true';
+      $('#moreMenu').hidden = true;
+      $('#open').textContent = selected ? '继续对话' : '新建对话';
+    }
+
+    function select(row) {
+      if (selected) selected.classList.remove('selected');
+      selected = row;
+      if (row) {
+        row.classList.add('selected');
+        for (let parent = row.parentElement; parent; parent = parent.parentElement) {
+          if (parent.tagName === 'DETAILS') parent.open = true;
+        }
+      }
+      updateActions();
+    }
+
+    function showPanel(name) {
+      $$('.tab').forEach(tab => tab.classList.toggle('active', tab.dataset.panel === name));
+      $$('.panel').forEach(panel => panel.hidden = panel.id !== `panel-${name}`);
+    }
+
+    function applyFilters() {
+      const paths = $$('#panel-directories input:checked').map(input => input.value);
+      const time = $('#timeFilter').value;
+      let visible = 0;
+      $$('.conversation').forEach(row => {
+        const directoryMatch = !paths.length || paths.some(path => row.dataset.path === path || row.dataset.path.startsWith(`${path}/`));
+        const timeMatch = time === 'all' || time === 'week' || time === 'month' || row.dataset.age === time;
+        row.hidden = !directoryMatch || !timeMatch;
+        if (!row.hidden) visible++;
+      });
+      $$('#panel-conversations details').reverse().forEach(details => {
+        details.hidden = ![...details.querySelectorAll('.conversation')].some(row => !row.hidden);
+      });
+      $$('.branch').forEach(branch => branch.hidden = !branch.querySelector('.conversation:not([hidden])'));
+      if (selected?.hidden) select(null);
+      $('#visibleCount').textContent = `${visible} 条`;
+      $('#directoryFilterCount').textContent = paths.length ? `已筛选 ${paths.length} 个` : '全部';
+      $('#emptyConversations').hidden = visible !== 0;
+    }
+
+    $$('.tab').forEach(tab => tab.addEventListener('click', () => showPanel(tab.dataset.panel)));
+    $$('.conversation').forEach(row => {
+      const eye = document.createElement('button');
+      eye.className = 'row-view';
+      eye.type = 'button';
+      eye.textContent = '◉';
+      eye.title = '查看历史';
+      eye.setAttribute('aria-label', `查看${row.dataset.title}的历史`);
+      row.insertBefore(eye, row.querySelector('.star'));
+      eye.addEventListener('click', event => { event.stopPropagation(); viewHistory(row); });
+      row.addEventListener('click', event => { if (!event.target.closest('.star,.row-view')) select(row); });
+      row.addEventListener('keydown', event => { if (event.key === 'Enter' && event.target === row) select(row); });
+    });
+    $$('.star').forEach(button => button.addEventListener('click', () => {
+      button.classList.toggle('active');
+      const active = button.classList.contains('active');
+      button.textContent = active ? '★' : '☆';
+      button.setAttribute('aria-label', active ? '取消收藏' : '收藏');
+      notice(active ? '已收藏（仅本页演示）' : '已取消收藏（仅本页演示）');
+    }));
+    $$('#panel-directories input').forEach(input => input.addEventListener('change', applyFilters));
+    $('#clearDirectories').addEventListener('click', () => {
+      $$('#panel-directories input').forEach(input => input.checked = false);
+      applyFilters();
+    });
+    $('#timeFilter').addEventListener('change', applyFilters);
+    $('.mode').addEventListener('change', updateActions);
+    $$('.refresh').forEach(button => button.addEventListener('click', () => notice('示例数据已刷新；HTML 不连接远程主机')));
+    $('#chooseOpened').addEventListener('click', () => {
+      const row = $(`.conversation[data-id="${$('.opened-card').dataset.id}"]`);
+      $('#timeFilter').value = 'all';
+      $$('#panel-directories input').forEach(input => input.checked = false);
+      applyFilters();
+      showPanel('conversations');
+      select(row);
+      row.scrollIntoView({ block:'center', behavior:'smooth' });
+    });
+    $('.back').addEventListener('click', () => notice('这是独立 HTML 演示页'));
+    $('#modalCancel').addEventListener('click', () => $('#modal').close());
+    $('#modalConfirm').addEventListener('click', () => { const action = onConfirm; $('#modal').close(); action?.(); });
+
+    function newConversation() {
+      modal('新建 Codex 对话', '示例会话目录：/home/qwer/Projects/ssh_tool_app。输入名称可体验创建确认。',
+        () => notice(`已演示创建「${$('#modalInput').value.trim() || '未命名对话'}」；未连接远程主机`), true);
+    }
+    $('#new').addEventListener('click', newConversation);
+    function viewHistory(row) {
+      modal(`查看：${row.dataset.title}`, `${row.dataset.path}\n\n示例历史：${row.querySelector('.preview').textContent}`, () => {});
+    }
+    $('#open').addEventListener('click', () => {
+      if (!selected) return newConversation();
+      notice(`${selected.dataset.opened === 'local' ? '演示进入本地已打开对话' : '演示恢复远程历史对话'}：${selected.dataset.title}`);
+    });
+    $('#more').addEventListener('click', () => $('#moreMenu').hidden = !$('#moreMenu').hidden);
+    $('#kill').addEventListener('click', () => {
+      if (!selected) return;
+      $('#moreMenu').hidden = true;
+      const title = selected.dataset.title;
+      modal('确认 Kill 并恢复？', `将停止占用「${title}」的远端 Codex 进程；正在执行的回答会中断。`,
+        () => notice(`演示 Kill / 恢复：${title}；未执行远程操作`));
+    });
+    $('#fork').addEventListener('click', () => {
+      $('#moreMenu').hidden = true;
+      if (selected) notice(`演示 Fork：${selected.dataset.title}；未执行远程操作`);
+    });
+    updateActions();
+  </script>
+</body>
+</html>
