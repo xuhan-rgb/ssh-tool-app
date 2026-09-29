@@ -299,6 +299,10 @@ void main() {
         CodexConversation(id: 'expired', cwd: '/p', updatedAt: now,
             completedAt: now.subtract(const Duration(hours: 25)),
             title: '超过24小时但日志刚更新', state: CodexConversationState.complete),
+        const CodexConversation(id: 'pending-same-dir', cwd: '/p', updatedAt: null,
+            title: '同目录待处理', state: CodexConversationState.pending),
+        const CodexConversation(id: 'aborted-same-dir', cwd: '/p', updatedAt: null,
+            title: '同目录已中止', state: CodexConversationState.aborted),
         running,
       ],
       loadRunningConversations: () async => const [running],
@@ -310,7 +314,7 @@ void main() {
     expect(tester.getSize(find.text('远程对话')).width, greaterThanOrEqualTo(48));
     final headingRow = find.ancestor(
         of: find.text('远程对话'), matching: find.byType(Row)).first;
-    final headingCount = find.descendant(of: headingRow, matching: find.text('4 条'));
+    final headingCount = find.descendant(of: headingRow, matching: find.text('6 条'));
     expect(tester.getRect(headingCount).left -
         tester.getRect(find.text('远程对话')).right, closeTo(6, 0.1));
     expect(tester.getRect(find.byKey(const ValueKey('conversation-filter-all'))).left -
@@ -320,6 +324,8 @@ void main() {
     expect(find.text('电脑端已完成'), findsOneWidget);
     expect(find.text('已经看过'), findsOneWidget);
     expect(find.text('仍在执行'), findsOneWidget);
+    expect(find.text('同目录待处理'), findsNothing);
+    expect(find.text('同目录已中止'), findsNothing);
     expect(find.text('超过24小时但日志刚更新'), findsNothing);
     expect(StorageService.getCodexConversationViewedAt(connectionId, 'unread'),
         isNull, reason: 'Preloading must not mark results read');
@@ -334,10 +340,14 @@ void main() {
     expect(find.text('电脑端已完成'), findsNothing);
     expect(find.text('已经看过'), findsNothing);
     expect(find.text('仍在执行'), findsOneWidget);
+    expect(find.text('同目录待处理'), findsNothing);
+    expect(find.text('同目录已中止'), findsNothing);
     await tester.tap(find.byKey(const ValueKey('conversation-filter-all')));
     await tester.pump();
     expect(find.text('电脑端已完成'), findsOneWidget);
     expect(find.text('超过24小时但日志刚更新'), findsOneWidget);
+    expect(find.text('同目录待处理'), findsOneWidget);
+    expect(find.text('同目录已中止'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });

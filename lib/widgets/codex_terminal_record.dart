@@ -62,44 +62,80 @@ class _CodexTerminalRecordState extends State<CodexTerminalRecord> {
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 7),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('• ',
-              style: TextStyle(color: failed ? AppTheme.red : AppTheme.green)),
-          Expanded(
-              child: Text(summary,
-                  maxLines: _expanded ? null : 1,
-                  overflow:
-                      _expanded ? TextOverflow.visible : TextOverflow.ellipsis,
-                  style: TextStyle(
-                      fontFamily: 'monospace',
-                      fontWeight: FontWeight.w600,
-                      color: failed ? AppTheme.red : AppTheme.textPrimary,
-                      fontSize: 12))),
-        ]),
-        if (details.isNotEmpty) ...[
-          const SizedBox(height: 4),
-          for (final line in visible)
-            Container(
-              width: double.infinity,
-              padding: const EdgeInsets.only(left: 14, right: 4),
-              color: line.startsWith('+')
-                  ? AppTheme.green.withValues(alpha: 0.14)
-                  : line.startsWith('-')
-                      ? AppTheme.red.withValues(alpha: 0.14)
-                      : null,
-              child: _expanded
-                  ? SelectableText(_lineText(line), style: _lineStyle(line))
-                  : Text(_lineText(line),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      softWrap: false,
-                      style: _lineStyle(line)),
-            ),
+        LayoutBuilder(
+            builder: (context, constraints) => SingleChildScrollView(
+                  scrollDirection: Axis.horizontal,
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(minWidth: constraints.maxWidth),
+                    child: IntrinsicWidth(
+                        child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text('• ',
+                                  style: TextStyle(
+                                      color: failed
+                                          ? AppTheme.red
+                                          : AppTheme.green)),
+                              Expanded(
+                                  child: Text(summary,
+                                      softWrap: false,
+                                      style: TextStyle(
+                                          fontFamily: 'monospace',
+                                          fontWeight: FontWeight.w600,
+                                          color: failed
+                                              ? AppTheme.red
+                                              : AppTheme.textPrimary,
+                                          fontSize: 12))),
+                            ]),
+                        if (details.isNotEmpty) ...[
+                          const SizedBox(height: 4),
+                          for (var index = 0; index < visible.length; index++)
+                            Container(
+                              width: double.infinity,
+                              padding:
+                                  const EdgeInsets.only(left: 14, right: 4),
+                              color: visible[index].startsWith('+')
+                                  ? AppTheme.green.withValues(alpha: 0.14)
+                                  : visible[index].startsWith('-')
+                                      ? AppTheme.red.withValues(alpha: 0.14)
+                                      : null,
+                              child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.start,
+                                  children: [
+                                    if (fileStarts.isEmpty)
+                                      SizedBox(
+                                        width: 16,
+                                        child: index == 0
+                                            ? Text('└ ',
+                                                softWrap: false,
+                                                style: _lineStyle(''))
+                                            : null,
+                                      ),
+                                    Expanded(
+                                        child: _expanded
+                                            ? SelectableText(
+                                                _lineText(visible[index]),
+                                                style:
+                                                    _lineStyle(visible[index]))
+                                            : Text(_lineText(visible[index]),
+                                                softWrap: false,
+                                                style: _lineStyle(
+                                                    visible[index]))),
+                                  ]),
+                            ),
+                        ],
+                      ],
+                    )),
+                  ),
+                )),
+        if (details.isNotEmpty)
           TextButton(
             onPressed: () => setState(() => _expanded = !_expanded),
             child: Text(_expanded ? '− 收起详情' : '+ 显示详情'),
           ),
-        ],
       ]),
     );
   }

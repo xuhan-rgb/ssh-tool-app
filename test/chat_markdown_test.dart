@@ -131,6 +131,51 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('long code lines scroll without wrapping while prose wraps',
+      (tester) async {
+    const codeLine =
+        'a_very_long_command_argument_that_should_remain_on_one_physical_line_'
+        'when_viewed_on_a_mobile_width_screen';
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(const MaterialApp(
+      home: Scaffold(
+        body: SizedBox(
+          width: 320,
+          child: ChatMarkdown(
+            '```text\n$codeLine\nsecond_line\n```\n'
+            'This ordinary prose should wrap across multiple lines on a narrow '
+            'mobile screen.',
+          ),
+        ),
+      ),
+    ));
+
+    final horizontal = find.byWidgetPredicate((widget) =>
+        widget is SingleChildScrollView &&
+        widget.scrollDirection == Axis.horizontal);
+    expect(horizontal, findsOneWidget);
+    final controller =
+        tester.widget<SingleChildScrollView>(horizontal).controller!;
+    expect(controller.position.maxScrollExtent, greaterThan(0));
+
+    final codeParagraph = tester.widgetList<SelectableText>(find.byType(SelectableText))
+        .firstWhere((paragraph) =>
+            (paragraph.textSpan?.toPlainText() ?? paragraph.data ?? '')
+                .contains(codeLine));
+    expect(codeParagraph.textSpan!.toPlainText(), '$codeLine\nsecond_line');
+    expect(tester.getSize(find.byWidget(codeParagraph)).height, lessThan(60));
+
+    final prose = tester.widgetList<SelectableText>(find.byType(SelectableText))
+        .firstWhere((text) =>
+            (text.textSpan?.toPlainText() ?? text.data ?? '').contains('ordinary prose'));
+    expect(tester.getSize(find.byWidget(prose)).height, greaterThan(40));
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('conversation renders markdown tables instead of pipe text',
       (tester) async {
     tester.view.physicalSize = const Size(390, 844);

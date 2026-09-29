@@ -157,6 +157,64 @@ void main() {
     expect(find.text('+new a'), findsOneWidget);
     expect(find.text('+new b'), findsOneWidget);
   });
+  testWidgets('command output has a branch and aligned continuation rows',
+      (tester) async {
+    await tester.pumpWidget(const MaterialApp(
+        home: Scaffold(
+            body: CodexTerminalRecord(
+      record: CodexConversationRecord(
+          kind: 'tool_call', timestamp: null, text: 'raw',
+          terminalSummary: "Ran python - <<'PY' …",
+          terminalDetails: 'runtime ready\ntiming None\nlidar ready'),
+    ))));
+    expect(find.text('└ '), findsOneWidget);
+    expect(tester.getTopLeft(find.text('runtime ready')).dx,
+        tester.getTopLeft(find.text('timing None')).dx);
+    expect(tester.getTopLeft(find.text('runtime ready')).dx,
+        greaterThan(tester.getTopLeft(find.text("Ran python - <<'PY' …")).dx));
+    await tester.tap(find.text('+ 显示详情'));
+    await tester.pump();
+    expect(find.text('└ '), findsOneWidget);
+    expect(tester.getTopLeft(find.text('runtime ready')).dx,
+        tester.getTopLeft(find.text('lidar ready')).dx);
+    expect(find.text("Ran python - <<'PY' …"), findsOneWidget);
+  });
+
+  testWidgets('long code lines scroll horizontally without wrapping or ellipsis',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final code = 'result = ${'long_identifier + ' * 30}last_value';
+    await tester.pumpWidget(MaterialApp(home: Scaffold(
+      body: CodexTerminalRecord(record: CodexConversationRecord(
+        kind: 'tool_call', timestamp: null, text: 'raw',
+        terminalSummary: 'Ran $code', terminalDetails: '$code\nsecond_line',
+      )),
+    )));
+    final horizontal = find.byWidgetPredicate((widget) =>
+        widget is Scrollable && widget.axisDirection == AxisDirection.right);
+    expect(horizontal, findsOneWidget);
+    final state = tester.state<ScrollableState>(horizontal);
+    expect(state.position.maxScrollExtent, greaterThan(0));
+    expect(tester.getSize(find.text(code)).height, lessThan(25));
+    expect(tester.widget<Text>(find.text(code)).overflow,
+        isNot(TextOverflow.ellipsis));
+    await tester.drag(horizontal, const Offset(-150, 0));
+    await tester.pumpAndSettle();
+    expect(state.position.pixels, greaterThan(0));
+    expect(tester.getTopLeft(find.text(code)).dx,
+        tester.getTopLeft(find.text('second_line')).dx);
+    await tester.tap(find.text('+ 显示详情'));
+    await tester.pump();
+    expect(tester.getSize(find.text(code)).height, lessThan(25));
+    expect(tester.getSize(find.text('second_line')).height, lessThan(25));
+    expect(tester.getTopLeft(find.text(code)).dx,
+        tester.getTopLeft(find.text('second_line')).dx);
+    expect(tester.takeException(), isNull);
+  });
+
   testWidgets('collapsed long output is bounded in screen rows',
       (tester) async {
     tester.view.physicalSize = const Size(390, 844);
