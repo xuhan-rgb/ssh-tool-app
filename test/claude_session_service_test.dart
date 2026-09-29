@@ -21,6 +21,7 @@ void main() {
     final home = await Directory.systemTemp.createTemp('claude-sessions-');
     addTearDown(() async {
       ClaudeSessionService.runPythonOverride = null;
+      ClaudeSessionService.clearCache();
       await home.delete(recursive: true);
     });
     final projects = await Directory('${home.path}/.claude/projects')
@@ -138,6 +139,7 @@ void main() {
     final home = await Directory.systemTemp.createTemp('claude-read-');
     addTearDown(() async {
       ClaudeSessionService.runPythonOverride = null;
+      ClaudeSessionService.clearCache();
       await home.delete(recursive: true);
     });
     final project = await Directory('${home.path}/.claude/projects/project')
@@ -216,7 +218,7 @@ void main() {
     ].join('\n'));
     ClaudeSessionService.runPythonOverride =
         (connectionId, script, args) async {
-      expect(script, ClaudeSessionService.readScript);
+      expect(script, contains('sync('));
       return runScript(script, home.path, args);
     };
     final records = await ClaudeSessionService.readConversation('remote-1', id);

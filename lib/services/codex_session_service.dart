@@ -8,6 +8,8 @@ import '../models/codex_goal.dart';
 import 'ssh_service.dart';
 import 'remote_state_service.dart';
 import 'storage_service.dart';
+import 'conversation_sync.dart';
+import 'remote_python_script.dart';
 
 class OpenedCodexSession {
   final String name;
@@ -319,6 +321,7 @@ class CodexPendingMessages extends ChangeNotifier {
 
 /// 查询和接管远端 Codex 会话。
 class CodexSessionService {
+  static final _recordSync = ConversationSync();
   static final LinkedHashMap<String, List<CodexConversation>> _conversationCache =
       LinkedHashMap();
   static final LinkedHashMap<String, List<CodexConversation>> _runningConversationCache =
@@ -353,6 +356,7 @@ class CodexSessionService {
       _recordCache[_recordKey(connectionId, conversationId)];
 
   static void clearCache([String? connectionId]) {
+    _recordSync.clear(connectionId);
     if (connectionId == null) {
       _conversationCache.clear();
       _runningConversationCache.clear();
@@ -699,11 +703,10 @@ class CodexSessionService {
 
   static Future<List<CodexConversationRecord>> _fetchConversation(
       String connectionId, String conversationId) async {
-    final raw = await _runPython(
-      connectionId,
-      _readScript,
-      [conversationId],
-    );
+    final raw = await _recordSync.read(connectionId, conversationId,
+        (version) => _runPython(connectionId,
+            ConversationSync.script(_readScript, 'codex'),
+            [conversationId, version], reuseScript: true));
     return CodexConversationParser.parseRecords(raw);
   }
 
@@ -764,7 +767,7 @@ class CodexSessionService {
 
   static Future<String> _runPython(
       String connectionId, String script, List<String> args,
-      {String? workDir, bool allowReconnect = true}) async {
+      {String? workDir, bool allowReconnect = true, bool reuseScript = false}) async {
     final override = runPythonOverride;
     if (override != null) return override(connectionId, script, args);
     final encoded = base64Encode(utf8.encode(script));
@@ -783,19 +786,25 @@ class CodexSessionService {
     }
     if (client == null) throw StateError('SSH 连接已断开');
 
-    late final List<int> result;
-    try {
-      result = await client.run(remoteCommand);
-    } catch (_) {
-      if (!allowReconnect || !client.isClosed || connection == null) rethrow;
-      await SshService.disconnect(connectionId);
-      final fresh = await SshService.connectClient(connection);
-      result = await fresh.client!.run(remoteCommand);
+    Future<String> execute(String command) async {
+      try {
+        return utf8.decode(await client!.run(command), allowMalformed: true);
+      } catch (_) {
+        if (!allowReconnect || !client!.isClosed || connection == null) rethrow;
+        await SshService.disconnect(connectionId);
+        client = (await SshService.connectClient(connection)).client;
+        return utf8.decode(await client!.run(command), allowMalformed: true);
+      }
     }
-    final output = utf8.decode(result, allowMalformed: true);
+    final output = reuseScript
+        ? await RemotePythonScript.run(script: script, args: args, execute: execute)
+        : await execute(remoteCommand);
     final marker = RegExp(r'__SSH_TOOL_EXIT__(\d+)\s*$').firstMatch(output);
     if (marker == null) throw StateError('远端命令未返回执行状态：$output');
     final body = output.substring(0, marker.start).trim();
+    if (reuseScript && body.isEmpty) {
+      throw StateError('Remote conversation sync returned no response');
+    }
     if (marker.group(1) != '0') {
       throw StateError('远端 Codex 查询失败：$body');
     }
@@ -1386,7 +1395,7 @@ for path in sessions_dir.rglob(f"*-{thread_id}.jsonl"):
     model = None
     try:
         with path.open(encoding="utf-8") as stream:
-            for line in stream:
+            for line_number, line in enumerate(stream):
                 try:
                     item = json.loads(line)
                 except Exception:
@@ -1585,6 +1594,7 @@ for path in sessions_dir.rglob(f"*-{thread_id}.jsonl"):
                                     terminal_summary = first_heading(summary_text)
                             if kind and text.strip():
                                 record = {"kind": kind, "timestamp": timestamp, "text": text[:12000], "reasoningEffort": reasoning_effort, "model": model, "terminalSummary": terminal_summary, "terminalDetails": terminal_details, "_turn": turn_number, "_structured": terminal_source}
+                                record["_syncId"] = str(line_number)
                                 records.append(record)
                                 if terminal_source:
                                     structured_by_turn.setdefault(turn_number, set()).add(terminal_source)
@@ -1651,6 +1661,7 @@ for path in sessions_dir.rglob(f"*-{thread_id}.jsonl"):
                             if entry.get("wrapperSource"):
                                 record["_wrapperSource"] = entry["wrapperSource"]
                                 record["_turn"] = turn_number
+                    record["_syncId"] = str(line_number)
                     records.append(record)
                     if kind == "assistant":
                         last_assistant = record
@@ -1666,7 +1677,7 @@ for path in sessions_dir.rglob(f"*-{thread_id}.jsonl"):
         for item in records[-300:]:
             print(json.dumps(item, ensure_ascii=False))
     except Exception:
-        pass
+        raise
     break
 ''';
 

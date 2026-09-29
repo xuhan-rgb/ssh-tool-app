@@ -5,9 +5,15 @@ import 'package:flutter/foundation.dart';
 import 'codex_session_service.dart';
 import 'ssh_service.dart';
 import 'storage_service.dart';
+import 'conversation_sync.dart';
+import 'remote_python_script.dart';
 
 /// Read-only access to Claude Code session history on a remote host.
 class ClaudeSessionService {
+  static final _recordSync = ConversationSync();
+
+  static void clearCache([String? connectionId]) => _recordSync.clear(connectionId);
+
   @visibleForTesting
   static Future<String> Function(
       String connectionId, String script, List<String> args)? runPythonOverride;
@@ -22,12 +28,16 @@ class ClaudeSessionService {
     if (!RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(id)) {
       throw ArgumentError.value(id, 'id', 'Invalid Claude session id');
     }
-    final raw = await _runPython(connectionId, readScript, [id]);
+    final raw = await _recordSync.read(connectionId, id,
+        (version) => _runPython(connectionId,
+            ConversationSync.script(readScript, 'claude'), [id, version],
+            reuseScript: true));
     return CodexConversationParser.parseRecords(raw);
   }
 
   static Future<String> _runPython(
-      String connectionId, String script, List<String> args) async {
+      String connectionId, String script, List<String> args,
+      {bool reuseScript = false}) async {
     final override = runPythonOverride;
     if (override != null) return override(connectionId, script, args);
     final encoded = base64Encode(utf8.encode(script));
@@ -44,13 +54,19 @@ class ClaudeSessionService {
       client = (await SshService.connectClient(connection)).client;
     }
     if (client == null) throw StateError('SSH connection is unavailable');
-    final result = await client.run(remote);
-    final output = utf8.decode(result, allowMalformed: true);
+    Future<String> execute(String command) async =>
+        utf8.decode(await client!.run(command), allowMalformed: true);
+    final output = reuseScript
+        ? await RemotePythonScript.run(script: script, args: args, execute: execute)
+        : await execute(remote);
     final marker = RegExp(r'__SSH_TOOL_EXIT__(\d+)\s*$').firstMatch(output);
     if (marker == null) {
       throw StateError('Remote Python command did not return an exit status');
     }
     final body = output.substring(0, marker.start).trim();
+    if (reuseScript && body.isEmpty) {
+      throw StateError('Remote conversation sync returned no response');
+    }
     if (marker.group(1) != '0') {
       throw StateError('Remote Claude query failed: $body');
     }
@@ -193,7 +209,7 @@ def tool_label(name, tool_input):
     return name
 
 with path.open(encoding="utf-8") as stream:
-    for line in stream:
+    for line_number, line in enumerate(stream):
         try: item = json.loads(line)
         except Exception: continue
         if not isinstance(item, dict): continue
@@ -211,20 +227,20 @@ with path.open(encoding="utf-8") as stream:
             role = message.get("role") or kind
             content = message.get("content")
             if isinstance(content, str):
-                if content.strip(): records.append({"kind": role, "timestamp": timestamp, "text": content.strip()[:12000], "model": current_model, "reasoningEffort": current_effort})
+                if content.strip(): records.append({"_syncId": str(line_number), "kind": role, "timestamp": timestamp, "text": content.strip()[:12000], "model": current_model, "reasoningEffort": current_effort})
             elif isinstance(content, list):
-                for block in content:
+                for block_number, block in enumerate(content):
                     if not isinstance(block, dict): continue
                     block_type = block.get("type")
                     if block_type == "text" and isinstance(block.get("text"), str) and block["text"].strip():
-                        records.append({"kind": role, "timestamp": timestamp, "text": block["text"].strip()[:12000], "model": current_model, "reasoningEffort": current_effort})
+                        records.append({"_syncId": str(line_number) + ":" + str(block_number), "kind": role, "timestamp": timestamp, "text": block["text"].strip()[:12000], "model": current_model, "reasoningEffort": current_effort})
                     elif block_type == "tool_use":
                         call_id = block.get("id")
                         name = str(block.get("name") or "tool")
                         tool_input = block.get("input", {})
                         raw = json.dumps(block, ensure_ascii=False)
                         label = tool_label(name, tool_input)
-                        record = {"kind": "tool_call", "timestamp": timestamp, "text": "tool: " + name + "\n" + raw[:12000], "terminalSummary": "Running " + label, "model": current_model, "reasoningEffort": current_effort}
+                        record = {"_syncId": str(line_number) + ":" + str(block_number), "kind": "tool_call", "timestamp": timestamp, "text": "tool: " + name + "\n" + raw[:12000], "terminalSummary": "Running " + label, "model": current_model, "reasoningEffort": current_effort}
                         records.append(record)
                         if call_id: calls[call_id] = record
                     elif block_type == "tool_result":
@@ -237,7 +253,7 @@ with path.open(encoding="utf-8") as stream:
                             label = tool_label(call_name, tool_input)
                             call["terminalSummary"] = ("Failed " if block.get("is_error") else ("Ran " if call_name == "Bash" else "Completed ")) + label
                             call["terminalDetails"] = output[:12000]
-                        records.append({"kind": "tool_output", "timestamp": timestamp, "text": json.dumps(block, ensure_ascii=False)[:12000], "model": current_model, "reasoningEffort": current_effort})
+                        records.append({"_syncId": str(line_number) + ":" + str(block_number), "kind": "tool_output", "timestamp": timestamp, "text": json.dumps(block, ensure_ascii=False)[:12000], "model": current_model, "reasoningEffort": current_effort})
 
 for record in records[-300:]: print(json.dumps(record, ensure_ascii=False))
 ''';

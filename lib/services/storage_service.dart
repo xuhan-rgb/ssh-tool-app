@@ -7,6 +7,7 @@ import '../models/ssh_connection.dart';
 import '../models/command_record.dart';
 import '../models/codex_completion_notice.dart';
 import 'codex_session_service.dart';
+import 'claude_session_service.dart';
 
 class StorageInitializationException implements Exception {
   const StorageInitializationException(this.message);
@@ -115,6 +116,7 @@ class StorageService {
   static Future<void> saveConnection(SshConnection connection) async {
     await _connectionsBox.put(connection.id, connection);
     CodexSessionService.clearCache(connection.id);
+    ClaudeSessionService.clearCache(connection.id);
   }
 
   // 获取所有连接
@@ -132,6 +134,7 @@ class StorageService {
   static Future<void> deleteConnection(String id) async {
     await _connectionsBox.delete(id);
     CodexSessionService.clearCache(id);
+    ClaudeSessionService.clearCache(id);
     // 同时删除该连接的所有命令历史
     await clearHistory(id);
     // 清理连接相关设置
@@ -160,6 +163,7 @@ class StorageService {
     connection.updatedAt = DateTime.now();
     await _connectionsBox.put(connection.id, connection);
     CodexSessionService.clearCache(connection.id);
+    ClaudeSessionService.clearCache(connection.id);
   }
 
   // ===== 命令历史管理 =====
@@ -529,6 +533,7 @@ class StorageService {
   // 清除所有数据（仅用于测试或重置）
   static Future<void> clearAll() async {
     CodexSessionService.clearCache();
+    ClaudeSessionService.clearCache();
     await _connectionsBox.clear();
     await _commandHistoryBox.clear();
   }
