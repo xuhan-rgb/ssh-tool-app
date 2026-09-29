@@ -12,6 +12,7 @@ import '../models/ssh_connection.dart';
 import '../services/macos_keyboard_bridge.dart';
 import '../services/notification_service.dart';
 import '../services/codex_session_service.dart';
+import '../services/claude_runtime_service.dart';
 import '../services/codex_chat_service.dart';
 import '../services/remote_state_service.dart';
 import '../services/ssh_service.dart';
@@ -21,8 +22,10 @@ import '../services/tmux_config_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/history_panel.dart';
 import '../widgets/chat_markdown.dart';
+import '../widgets/codex_terminal_record.dart';
 import '../widgets/codex_goal_card.dart';
 import 'codex_chat_screen.dart';
+import 'remote_file_preview_screen.dart';
 import 'codex_notification_history_screen.dart';
 
 /// Claude 工作状态
@@ -293,6 +296,13 @@ extension _CodexTimeFilterLabel on _CodexTimeFilter {
 
 class CodexSessionDialog extends StatefulWidget {
   final String connectionId;
+  final bool isClaude;
+  final Future<void> Function(bool openAsChat)? onCreateConversation;
+  final Future<void> Function(CodexConversation conversation, bool openAsChat)? onContinueConversation;
+  final Set<String>? initialFavoriteConversations;
+  final Set<String>? initialFavoriteDirectories;
+  final Set<String>? initialFilteredDirectories;
+  final Future<void> Function(String connectionId, Set<String> paths)? saveFavoriteDirectories;
   final String defaultName;
   final String defaultWorkDir;
   final String dialogTitle;
@@ -320,6 +330,13 @@ class CodexSessionDialog extends StatefulWidget {
 
   const CodexSessionDialog({
     this.connectionId = '',
+    this.isClaude = false,
+    this.onCreateConversation,
+    this.onContinueConversation,
+    this.initialFavoriteConversations,
+    this.initialFavoriteDirectories,
+    this.initialFilteredDirectories,
+    this.saveFavoriteDirectories,
     required this.defaultName,
     required this.defaultWorkDir,
     this.dialogTitle = '新建 Codex 会话',
@@ -437,7 +454,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
   }
 
   bool _isUnreadCompleted(CodexConversation conversation) {
-    if (widget.connectionId.isEmpty ||
+    if (widget.isClaude || widget.connectionId.isEmpty ||
         conversation.state != CodexConversationState.complete) {
       return false;
     }
@@ -489,7 +506,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       return conversation!.title.trim();
     }
     if (prefix.isEmpty) return session.name;
-    return 'Codex 对话';
+    return widget.isClaude ? 'Claude 对话' : 'Codex 对话';
   }
 
   @override
@@ -497,23 +514,25 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     super.initState();
     _conversations = widget.initialConversations.isNotEmpty
         ? widget.initialConversations
-        : widget.startWithAllConversations
+        : widget.startWithAllConversations && !widget.isClaude
             ? CodexSessionService.cachedConversations(widget.connectionId) ??
                 const []
             : const [];
-    NotificationService.historyRevision.addListener(_onConversationReadChanged);
+    if (!widget.isClaude) {
+      NotificationService.historyRevision.addListener(_onConversationReadChanged);
+    }
     _directoryConversations = _conversations;
-    _runningConversations =
+    _runningConversations = widget.isClaude ? null :
         CodexSessionService.cachedRunningConversations(widget.connectionId);
-    _favoriteDirectories =
-        StorageService.getFavoriteCodexDirectories(widget.connectionId);
-    _favoriteConversations =
-        StorageService.getFavoriteCodexConversations(widget.connectionId);
-    _localOpenedConversationIds =
+    _favoriteDirectories = {...?widget.initialFavoriteDirectories,
+      if (!widget.isClaude) ...StorageService.getFavoriteCodexDirectories(widget.connectionId)};
+    _favoriteConversations = {...?widget.initialFavoriteConversations,
+      if (!widget.isClaude) ...StorageService.getFavoriteCodexConversations(widget.connectionId)};
+    _localOpenedConversationIds = widget.isClaude ? {} :
         StorageService.getOpenedCodexConversations(widget.connectionId);
-    _filteredDirectories =
-        StorageService.getFilteredCodexDirectories(widget.connectionId);
-    _openAsChat = widget.initialOpenAsChat ?? StorageService.getCodexChatMode();
+    _filteredDirectories = {...?widget.initialFilteredDirectories,
+      if (!widget.isClaude) ...StorageService.getFilteredCodexDirectories(widget.connectionId)};
+    _openAsChat = widget.initialOpenAsChat ?? (widget.isClaude ? true : StorageService.getCodexChatMode());
     _workDir = widget.defaultWorkDir;
     _showAllConversations = widget.startWithAllConversations;
     unawaited(
@@ -562,7 +581,9 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
   @override
   void dispose() {
     _statusRefreshTimer?.cancel();
-    NotificationService.historyRevision.removeListener(_onConversationReadChanged);
+    if (!widget.isClaude) {
+      NotificationService.historyRevision.removeListener(_onConversationReadChanged);
+    }
     super.dispose();
   }
 
@@ -784,8 +805,12 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     setState(() {
       if (!_favoriteDirectories.add(path)) _favoriteDirectories.remove(path);
     });
-    unawaited(StorageService.setFavoriteCodexDirectories(
-        widget.connectionId, _favoriteDirectories));
+    final save = widget.saveFavoriteDirectories;
+    if (save != null) {
+      unawaited(save(widget.connectionId, {..._favoriteDirectories}));
+    } else if (!widget.isClaude) {
+      unawaited(StorageService.setFavoriteCodexDirectories(widget.connectionId, _favoriteDirectories));
+    }
   }
 
   void _toggleFavoriteConversation(String id) {
@@ -797,6 +822,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
         _selectedConversationId = null;
       }
     });
+    if (widget.isClaude && widget.saveFavoriteConversations == null) return;
     unawaited((widget.saveFavoriteConversations ??
             StorageService.setFavoriteCodexConversations)(
         widget.connectionId, {..._favoriteConversations}));
@@ -823,6 +849,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
   }
 
   void _saveFilteredDirectories() {
+    if (widget.isClaude && widget.saveFilteredDirectories == null) return;
     unawaited((widget.saveFilteredDirectories ??
         StorageService.setFilteredCodexDirectories)(
       widget.connectionId,
@@ -1194,6 +1221,10 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
   }) {
     final useChat = openAsChat ?? _openAsChat;
     final conversation = _selectedConversation;
+    if (widget.isClaude && conversation != null) {
+      if (!_attachingRunningChat) unawaited(_continueProvidedConversation(conversation, useChat));
+      return;
+    }
     final opened = conversation == null ||
             stopWriterBeforeLaunch ||
             launch == CodexConversationLaunch.fork
@@ -1224,7 +1255,28 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     );
   }
 
+  Future<void> _continueProvidedConversation(CodexConversation conversation, bool openAsChat) async {
+    final open = widget.onContinueConversation;
+    if (open == null) return;
+    setState(() => _attachingRunningChat = true);
+    try {
+      await open(conversation, openAsChat);
+      if (mounted) await _refreshActiveConversationStates();
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('打开对话失败：$error')));
+      }
+    } finally {
+      if (mounted) setState(() => _attachingRunningChat = false);
+    }
+  }
+
   Future<void> _showNewConversationSheet() async {
+    if (widget.onCreateConversation != null) {
+      await widget.onCreateConversation!(_openAsChat);
+      if (mounted) unawaited(_refreshActiveConversationStates());
+      return;
+    }
     var chosenPath = _workDir;
     var favorite = true;
     var listingFuture = widget.loadDirectories(_workDir);
@@ -1621,7 +1673,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                       const SizedBox(width: 4),
                       Text('本软件聊天',
                           style: TextStyle(color: AppTheme.cyan, fontSize: 10)),
-                    ] else if (!conversation.canResume) ...[
+                    ] else if (!widget.isClaude && !conversation.canResume) ...[
                       const SizedBox(width: 4),
                       Text(
                           conversation.state == CodexConversationState.running
@@ -1633,7 +1685,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                               TextStyle(color: AppTheme.orange, fontSize: 10)),
                     ],
                   ]),
-                  ValueListenableBuilder<int>(
+                  if (!widget.isClaude) ValueListenableBuilder<int>(
                     valueListenable: NotificationService.historyRevision,
                     builder: (context, _, __) {
                       final newlyCompleted = StorageService
@@ -1714,7 +1766,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       return Center(
         child: Text(
           runningView ? '当前没有正在执行或24小时内完成的对话' :
-          _showAllConversations ? '远端没有找到 Codex 对话记录' : '当前目录没有找到 Codex 对话',
+          _showAllConversations ? '远端没有找到 ${widget.isClaude ? 'Claude' : 'Codex'} 对话记录' : '当前目录没有找到 ${widget.isClaude ? 'Claude' : 'Codex'} 对话',
           style: TextStyle(color: AppTheme.textMuted, fontSize: 12),
           textAlign: TextAlign.center,
         ),
@@ -1730,8 +1782,8 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
               : favoritesOnly && _favoriteConversations.isEmpty
               ? '还没有收藏的对话'
               : _filteredDirectories.isNotEmpty
-                  ? '所选目录没有符合条件的 Codex 对话'
-                  : '${_timeFilter.label}没有 Codex 对话',
+                  ? '所选目录没有符合条件的 ${widget.isClaude ? 'Claude' : 'Codex'} 对话'
+                  : '${_timeFilter.label}没有 ${widget.isClaude ? 'Claude' : 'Codex'} 对话',
           style: TextStyle(color: AppTheme.textMuted, fontSize: 12),
         ),
       );
@@ -2085,6 +2137,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       context: context,
       builder: (_) => CodexConversationViewerDialog(
         connectionId: widget.connectionId,
+        isClaude: widget.isClaude,
         conversation: conversation,
         loadRecords: widget.loadRecords,
       ),
@@ -2125,7 +2178,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     if (conversation == null) return const SizedBox.shrink();
 
     final stateColor = _stateColor(conversation.state);
-    final canTakeover = conversation.canTakeover;
+    final canTakeover = !widget.isClaude && conversation.canTakeover;
     final canCheckRunningChat = _canCheckRunningChat(conversation);
     return Container(
       width: double.infinity,
@@ -2161,6 +2214,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
             ],
           ),
           Text(
+            widget.isClaude ? '连接同一运行实例，或恢复历史对话\n目录：${conversation.cwd}' :
             '${canCheckRunningChat ? '可接入' : conversation.state == CodexConversationState.running ? '等待当前执行完成' : conversation.canResume ? '可恢复' : canTakeover ? '需接管' : '不可恢复'} · ${conversation.recoveryReason}\n目录：${conversation.cwd}',
             style: TextStyle(
               color: canTakeover ? AppTheme.green : AppTheme.orange,
@@ -2203,7 +2257,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                   padding: const EdgeInsets.symmetric(horizontal: 6),
                 ),
               ),
-              OutlinedButton.icon(
+              if (!widget.isClaude) OutlinedButton.icon(
                 onPressed: canTakeover
                     ? () => _confirmKillAndResume(conversation)
                     : null,
@@ -2218,7 +2272,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                   padding: const EdgeInsets.symmetric(horizontal: 7),
                 ),
               ),
-              OutlinedButton.icon(
+              if (!widget.isClaude) OutlinedButton.icon(
                 onPressed: canTakeover
                     ? () => _submit(
                           launch: CodexConversationLaunch.fork,
@@ -2237,7 +2291,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
               ),
             ],
           ),
-          if (!canTakeover && !canCheckRunningChat)
+          if (!widget.isClaude && !canTakeover && !canCheckRunningChat)
             Padding(
               padding: EdgeInsets.only(left: 6, bottom: 3),
               child: Text(
@@ -2384,7 +2438,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     setState(() => _openAsChat = useChat);
     if (widget.onOpenModeChanged != null) {
       widget.onOpenModeChanged!(useChat);
-    } else {
+    } else if (!widget.isClaude) {
       unawaited(StorageService.setCodexChatMode(useChat));
     }
   }
@@ -2507,7 +2561,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                           ? '收藏的对话'
                           : _usesMobileLayout(context)
                               ? '远程对话'
-                              : '远程 Codex 对话',
+                              : '远程 ${widget.isClaude ? 'Claude' : 'Codex'} 对话',
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
@@ -2646,7 +2700,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       );
     }
     final canContinue =
-        conversation.canResume || _isOpenedConversation(conversation);
+        (widget.isClaude ? conversation.directoryExists : conversation.canResume) || _isOpenedConversation(conversation);
     final canCheckRunningChat = _canCheckRunningChat(conversation);
     return Column(mainAxisSize: MainAxisSize.min, children: [
       Row(children: [
@@ -2687,7 +2741,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                   ? '取消收藏'
                   : '收藏对话'),
             ),
-            if (conversation.canTakeover) ...const [
+            if (!widget.isClaude && conversation.canTakeover) ...const [
               PopupMenuItem(value: 'fork', child: Text('Fork 副本')),
               PopupMenuItem(value: 'kill', child: Text('Kill 并恢复')),
             ],
@@ -2737,7 +2791,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
             onPressed: () => Navigator.pop(context),
           ),
           actions: [
-            if (widget.connectionId.isNotEmpty)
+            if (!widget.isClaude && widget.connectionId.isNotEmpty)
               CodexServerNotificationButton(connectionId: widget.connectionId),
             IconButton(
               tooltip: '新建对话',
@@ -2887,7 +2941,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                       ? () =>
                           unawaited(_attachRunningChat(_selectedConversation!))
                       : isResuming &&
-                              !_selectedConversation!.canResume &&
+                              !(widget.isClaude ? _selectedConversation!.directoryExists : _selectedConversation!.canResume) &&
                               !_isOpenedConversation(_selectedConversation!)
                           ? null
                           : isResuming
@@ -2922,6 +2976,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
 
 class CodexConversationViewerDialog extends StatefulWidget {
   final String connectionId;
+  final bool isClaude;
   final CodexConversation conversation;
   final Future<CodexMessageRoute> Function(String message)? sendMessage;
   final Future<List<CodexConversationRecord>> Function(String conversationId)
@@ -2929,6 +2984,7 @@ class CodexConversationViewerDialog extends StatefulWidget {
 
   const CodexConversationViewerDialog({
     this.connectionId = '',
+    this.isClaude = false,
     this.sendMessage,
     required this.conversation,
     required this.loadRecords,
@@ -2945,13 +3001,104 @@ class _CodexConversationViewerDialogState
   Timer? _refreshTimer;
   CodexConversationState? _observedState;
   bool _requestInFlight = false;
-  bool _showFullLog = false;
+  late String _logLevel;
   bool _loading = true;
   String? _error;
   final _messageController = TextEditingController();
   bool _sendingMessage = false;
   String? _sendError;
   late final CodexPendingMessages _pendingMessages;
+  ClaudeRuntimeStatus? _claudeStatus;
+  String? _claudeStatusError;
+  String? _claudeDraftId;
+  String? _claudeDraftText;
+
+  Future<void> _loadClaudeStatus() async {
+    if (!widget.isClaude || widget.connectionId.isEmpty) return;
+    try {
+      final status = await ClaudeRuntimeService.status(widget.connectionId, widget.conversation.id);
+      if (mounted) setState(() { _claudeStatus = status; _claudeStatusError = null; });
+    } catch (error) {
+      if (mounted) setState(() => _claudeStatusError = error.toString());
+    }
+  }
+
+  Future<void> _continueClaude() async {
+    setState(() { _sendingMessage = true; _sendError = null; });
+    try {
+      await ClaudeRuntimeService.ensureSession(widget.connectionId,
+        sessionId: widget.conversation.id, workDir: widget.conversation.cwd);
+      await _loadClaudeStatus();
+    } catch (error) {
+      if (mounted) setState(() => _sendError = error.toString());
+    } finally {
+      if (mounted) setState(() => _sendingMessage = false);
+    }
+  }
+
+  Future<void> _sendClaudeMessage(String message) async {
+    if (_claudeDraftText != message) {
+      _claudeDraftText = message;
+      _claudeDraftId = ClaudeRuntimeService.newMessageId();
+    }
+    setState(() { _sendingMessage = true; _sendError = null; });
+    try {
+      await ClaudeRuntimeService.send(widget.connectionId, widget.conversation.id,
+        message, messageId: _claudeDraftId!);
+      if (mounted) setState(() => _messageController.clear());
+      _claudeDraftId = null;
+      _claudeDraftText = null;
+      await _loadClaudeStatus();
+    } catch (error) {
+      if (mounted) setState(() => _sendError = '发送失败：$error');
+    } finally {
+      if (mounted) setState(() => _sendingMessage = false);
+    }
+  }
+
+  Widget _claudeControls() {
+    final session = _claudeStatus?.session;
+    final active = session?.isAlive == true;
+    final connection = StorageService.getConnection(widget.connectionId);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      if (_claudeStatusError != null) Text('运行状态读取失败：$_claudeStatusError',
+        style: TextStyle(color: AppTheme.orange, fontSize: 12)),
+      if (_sendError != null) Text(_sendError!, style: TextStyle(color: AppTheme.red, fontSize: 12)),
+      Row(children: [
+        Expanded(child: Text(switch (session?.status) {
+          'starting' => 'Claude 正在启动，请在终端完成首次确认',
+          'busy' => 'Claude 正在执行 · 新消息会排队',
+          'awaiting_input' => 'Claude 等待确认 · 请打开终端处理',
+          'ready' => 'Claude 等待消息',
+          _ => '当前查看历史，继续后可发送消息',
+        }, style: TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
+        if (active) IconButton(tooltip: '复制电脑连接命令', icon: const Icon(Icons.copy, size: 18),
+          onPressed: () async {
+            final name = session!.tmuxSession.replaceAll("'", "'\"'\"'");
+            await Clipboard.setData(ClipboardData(text: "tmux attach-session -t '$name'"));
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('已复制连接命令，在电脑执行可连接同一 Claude 实例')));
+            }
+          }),
+        if (active && connection != null) TextButton(onPressed: () => Navigator.of(context).push(
+          MaterialPageRoute(builder: (_) => TmuxWorkspaceScreen(connection: connection,
+            initialSessionName: session!.tmuxSession, initialConversationId: widget.conversation.id))),
+          child: const Text('打开终端')),
+        if (!active) TextButton(onPressed: _sendingMessage || _claudeStatusError != null ? null : _continueClaude,
+          child: const Text('继续此对话')),
+      ]),
+      if (active) Row(children: [
+        Expanded(child: TextField(key: const ValueKey('claude-message-input'),
+          controller: _messageController, enabled: !_sendingMessage,
+          minLines: 1, maxLines: 4,
+          decoration: const InputDecoration(hintText: '发送消息到此 Claude 实例', border: OutlineInputBorder()))),
+        IconButton(key: const ValueKey('claude-send-message'), onPressed: _sendingMessage ? null : _sendRemoteMessage,
+          icon: const Icon(Icons.send)),
+      ]),
+    ]);
+  }
+
 
   void _pendingMessagesChanged() {
     setState(() {});
@@ -2970,6 +3117,10 @@ class _CodexConversationViewerDialogState
   Future<void> _sendRemoteMessage() async {
     final message = _messageController.text;
     if (_sendingMessage || message.trim().isEmpty) return;
+    if (widget.isClaude) {
+      await _sendClaudeMessage(message);
+      return;
+    }
     final pending = _pendingMessages.add(message,
         _pendingMessages.nextOccurrence(_records, message),
         queued: false, route: CodexMessageRoute.steer);
@@ -2997,13 +3148,14 @@ class _CodexConversationViewerDialogState
   @override
   void initState() {
     super.initState();
-    _records = CodexSessionService.cachedRecords(
+    _logLevel = StorageService.getCodexViewerLogLevel();
+    _records = widget.isClaude ? const [] : CodexSessionService.cachedRecords(
             widget.connectionId, widget.conversation.id) ??
         const [];
-    _pendingMessages = CodexSessionService.pendingMessages(
+    _pendingMessages = widget.isClaude ? CodexPendingMessages() : CodexSessionService.pendingMessages(
         widget.connectionId, widget.conversation.id);
     _pendingMessages.addListener(_pendingMessagesChanged);
-    if (_pendingMessages.isNotEmpty ||
+    if (widget.isClaude || _pendingMessages.isNotEmpty ||
         widget.conversation.state == CodexConversationState.running ||
         widget.conversation.state == CodexConversationState.pending) {
       _startRefreshing();
@@ -3014,6 +3166,7 @@ class _CodexConversationViewerDialogState
   @override
   void dispose() {
     _pendingMessages.removeListener(_pendingMessagesChanged);
+    if (widget.isClaude) _pendingMessages.dispose();
     _refreshTimer?.cancel();
     _messageController.dispose();
     super.dispose();
@@ -3029,11 +3182,12 @@ class _CodexConversationViewerDialogState
       });
     }
     try {
+      if (widget.isClaude) await _loadClaudeStatus();
       final records = await widget.loadRecords(widget.conversation.id);
       if (!mounted) return;
       final lastKind = records.isEmpty ? null : records.last.kind;
       _pendingMessages.reconcile(records);
-      if (!_pendingMessages.isNotEmpty &&
+      if (!widget.isClaude && !_pendingMessages.isNotEmpty &&
           (lastKind == 'task_complete' || lastKind == 'turn_aborted')) {
         _refreshTimer?.cancel();
       }
@@ -3045,11 +3199,11 @@ class _CodexConversationViewerDialogState
           _observedState = CodexConversationState.complete;
         } else if (lastKind == 'turn_aborted') {
           _observedState = CodexConversationState.aborted;
-        } else if (_refreshTimer?.isActive == true && records.isNotEmpty) {
+        } else if (!widget.isClaude && _refreshTimer?.isActive == true && records.isNotEmpty) {
           _observedState = CodexConversationState.running;
         }
       });
-      if (widget.connectionId.isNotEmpty && records.isNotEmpty) {
+      if (!widget.isClaude && widget.connectionId.isNotEmpty && records.isNotEmpty) {
         final timestamps = [
           if (widget.conversation.updatedAt != null) widget.conversation.updatedAt!,
           ...records.map((record) => record.timestamp).whereType<DateTime>(),
@@ -3085,8 +3239,9 @@ class _CodexConversationViewerDialogState
   String _kindLabel(String kind) {
     return switch (kind) {
       'user' => '用户',
-      'assistant' => 'Codex',
+      'assistant' => widget.isClaude ? 'Claude' : 'Codex',
       'reasoning' => '推理',
+      'turn_context' => '任务配置',
       'tool_call' => '工具调用',
       'tool_output' => '工具输出',
       'task_started' => '任务开始',
@@ -3173,6 +3328,10 @@ class _CodexConversationViewerDialogState
               if (record.kind == 'user' || record.kind == 'assistant')
                 ChatMarkdown(
                   record.text,
+                  onTapLink: (_, href, __) => openRemoteFileLink(context,
+                    connectionId: widget.connectionId,
+                    workDir: widget.conversation.cwd,
+                    href: href),
                   style: TextStyle(
                     color: AppTheme.textPrimary,
                     fontSize: 12,
@@ -3195,11 +3354,59 @@ class _CodexConversationViewerDialogState
     );
   }
 
+  String get _reasoningEffortLabel {
+    final effort = _records.isEmpty ? null : _records.last.reasoningEffort;
+    return switch (effort) {
+      null || '' => '未知',
+      'none' => '无（none）',
+      'minimal' => '最低（minimal）',
+      'low' => '低（low）',
+      'medium' => '中（medium）',
+      'high' => '高（high）',
+      'xhigh' => '超高（xhigh）',
+      'max' => '最大（max）',
+      'ultra' => '极高（ultra）',
+      _ => effort,
+    };
+  }
+
+  Widget _buildTerminalStatus() {
+    final state = widget.isClaude && _claudeStatus?.session?.status == 'busy'
+        ? CodexConversationState.running : _observedState ?? widget.conversation.state;
+    if (_logLevel != 'terminal' || state != CodexConversationState.running) {
+      return const SizedBox.shrink();
+    }
+    String heading = widget.isClaude ? 'Claude 正在执行' : 'Working';
+    DateTime? startedAt = widget.isClaude ? _claudeStatus?.session?.updatedAt : null;
+    for (final record in _records) {
+      if (record.kind == 'task_started') {
+        startedAt = record.timestamp;
+        heading = 'Working';
+      } else if (record.kind == 'reasoning' && record.terminalSummary != null) {
+        heading = record.terminalSummary!;
+      }
+    }
+    final seconds = startedAt == null ? null :
+        DateTime.now().difference(startedAt).inSeconds.clamp(0, 2147483647);
+    final elapsed = seconds == null ? '' : ' (${seconds ~/ 60}m ${seconds % 60}s)';
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Text('• $heading$elapsed', key: const ValueKey('viewer-terminal-status'),
+        style: TextStyle(fontFamily: 'monospace', fontSize: 12, color: AppTheme.textSecondary)),
+    );
+  }
+
   Widget _buildViewerContent() {
     final pending = _pendingMessages.messages;
-    final visibleRecords = _showFullLog
-        ? _records
-        : _records.where(_isConversationMessage).toList();
+    final claudePending = (_claudeStatus?.messages ?? <ClaudeMessageReceipt>[]).where((receipt) =>
+      receipt.status != 'accepted' || !_records.any((record) => record.kind == 'user' &&
+        record.text.trim() == receipt.text.trim() && record.timestamp != null &&
+        !record.timestamp!.isBefore(receipt.timestamp.subtract(const Duration(seconds: 5))))).toList();
+    final visibleRecords = _records.where((record) =>
+        _logLevel == 'full' || _isConversationMessage(record) ||
+        (_logLevel == 'terminal' && record.kind != 'reasoning' &&
+          (record.terminalSummary != null ||
+           const ['task_started', 'task_complete', 'turn_aborted'].contains(record.kind)))).toList();
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -3217,25 +3424,40 @@ class _CodexConversationViewerDialogState
                 ),
               ),
             ),
-            TextButton(
+            DropdownButton<String>(
               key: const ValueKey('viewer-log-toggle'),
-              onPressed: () => setState(() => _showFullLog = !_showFullLog),
-              child: Text(_showFullLog ? '只看对话' : '完整日志'),
+              value: _logLevel,
+              underline: const SizedBox.shrink(),
+              items: const [
+                DropdownMenuItem(value: 'conversation', child: Text('只看对话')),
+                DropdownMenuItem(value: 'terminal', child: Text('终端视图')),
+                DropdownMenuItem(value: 'full', child: Text('完整日志')),
+              ],
+              onChanged: (value) {
+                if (value == null) return;
+                setState(() => _logLevel = value);
+                unawaited(StorageService.setCodexViewerLogLevel(value));
+              },
             ),
           ],
         ),
-        if (widget.connectionId.isNotEmpty)
+        Text(
+          '最近一轮 · 模型：${_records.isEmpty || _records.last.model == null || _records.last.model!.isEmpty ? '未知' : _records.last.model} · 思考强度：$_reasoningEffortLabel',
+          key: const ValueKey('viewer-reasoning-effort'),
+          style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+        ),
+        if (!widget.isClaude && widget.connectionId.isNotEmpty)
           CodexGoalCard(
             connectionId: widget.connectionId,
             conversationId: widget.conversation.id,
           ),
         const SizedBox(height: 10),
         Expanded(
-          child: _loading && _records.isEmpty && pending.isEmpty
+          child: _loading && _records.isEmpty && pending.isEmpty && claudePending.isEmpty
               ? Center(
                   child: CircularProgressIndicator(color: AppTheme.blue),
                 )
-              : _error != null && _records.isEmpty && pending.isEmpty
+              : _error != null && _records.isEmpty && pending.isEmpty && claudePending.isEmpty
                   ? Center(
                       child: Text(
                         '读取远程对话失败：$_error',
@@ -3246,7 +3468,7 @@ class _CodexConversationViewerDialogState
                         ),
                       ),
                     )
-                  : visibleRecords.isEmpty && pending.isEmpty
+                  : visibleRecords.isEmpty && pending.isEmpty && claudePending.isEmpty
                       ? Center(
                           child: Text(
                             _records.isEmpty ? '远程记录为空' : '没有可显示的文字对话，可查看完整日志',
@@ -3258,8 +3480,25 @@ class _CodexConversationViewerDialogState
                         )
                       : ListView.builder(
                           reverse: true,
-                          itemCount: visibleRecords.length + pending.length,
+                          itemCount: visibleRecords.length + pending.length + claudePending.length,
                           itemBuilder: (context, index) {
+                            if (index < claudePending.length) {
+                              final receipt = claudePending[claudePending.length - 1 - index];
+                              return Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
+                                _buildRecord(CodexConversationRecord(kind: 'user',
+                                  timestamp: receipt.timestamp, text: receipt.text), sendStatus: receipt.label),
+                                if (receipt.status == 'queued' || receipt.status == 'uncertain') TextButton(
+                                  onPressed: () async {
+                                    try {
+                                      await ClaudeRuntimeService.cancel(widget.connectionId, widget.conversation.id, receipt.id);
+                                      await _loadClaudeStatus();
+                                    } catch (error) {
+                                      if (mounted) setState(() => _sendError = error.toString());
+                                    }
+                                  }, child: Text(receipt.status == 'queued' ? '取消发送' : '已检查终端，移除此条')),
+                              ]);
+                            }
+                            index -= claudePending.length;
                             if (index < pending.length) {
                               final message = pending[pending.length - 1 - index];
                               return _buildRecord(
@@ -3271,12 +3510,20 @@ class _CodexConversationViewerDialogState
                                         : '已发送到远程队列',
                               );
                             }
-                            return _buildRecord(visibleRecords[
-                                visibleRecords.length - 1 - (index - pending.length)]);
+                            final record = visibleRecords[
+                                visibleRecords.length - 1 - (index - pending.length)];
+                            if (_logLevel == 'terminal' && !_isConversationMessage(record)) {
+                              return CodexTerminalRecord(
+                                key: ValueKey('terminal-${record.kind}-${record.timestamp}-${visibleRecords.length - 1 - (index - pending.length)}'),
+                                record: record);
+                            }
+                            return _buildRecord(record);
                           },
                         ),
         ),
-        if (!widget.conversation.isSubagent &&
+        _buildTerminalStatus(),
+        if (widget.isClaude && widget.connectionId.isNotEmpty) _claudeControls(),
+        if (!widget.isClaude && !widget.conversation.isSubagent &&
             (widget.connectionId.isNotEmpty || widget.sendMessage != null)) ...[
           const SizedBox(height: 8),
           if (_sendError != null)
@@ -4261,7 +4508,7 @@ class _TmuxWorkspaceScreenState extends State<TmuxWorkspaceScreen> {
           if (_tabs.any((tab) => tab.name == name)) continue;
           final type = name.startsWith('codex') || name.startsWith('fork-')
               ? SessionType.codex
-              : name.startsWith('claude')
+              : name.startsWith('claude') || name.startsWith('ssh-claude-')
                   ? SessionType.claude
                   : SessionType.shell;
           _tabs.add(_TabSession(
@@ -6480,8 +6727,8 @@ class _TmuxWorkspaceScreenState extends State<TmuxWorkspaceScreen> {
             mainAxisSize: MainAxisSize.min,
             children: [
               Text(_syncStatus == SyncStatus.failed
-                  ? '打开所选 Codex 对话失败'
-                  : '正在打开所选 Codex 对话…'),
+                  ? '打开所选对话失败'
+                  : '正在打开所选对话…'),
               if (_syncStatus == SyncStatus.failed)
                 TextButton(
                   onPressed: _initConnection,

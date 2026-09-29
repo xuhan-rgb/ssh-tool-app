@@ -10,6 +10,7 @@ import '../services/notification_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/connection_card.dart';
 import 'connection_form_screen.dart';
+import 'claude_conversation_picker_screen.dart';
 import 'tmux_workspace_screen.dart';
 import 'codex_notification_history_screen.dart';
 
@@ -24,10 +25,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final CodexPreloadService _preloader = CodexPreloadService();
   Timer? _preloadTimer;
   bool _preloadInProgress = false;
+  late String _assistant;
 
   @override
   void initState() {
     super.initState();
+    _assistant = StorageService.getHomeAssistant();
     WidgetsBinding.instance.addObserver(this);
     WidgetsBinding.instance.addPostFrameCallback((_) => _preloadIfVisible());
     _preloadTimer = Timer.periodic(
@@ -43,6 +46,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
 
   Future<void> _preloadIfVisible() async {
     if (!mounted ||
+        _assistant != 'codex' ||
         _preloadInProgress ||
         WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed ||
         (ModalRoute.of(context)?.isCurrent == false)) {
@@ -72,7 +76,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       appBar: AppBar(
         title: const Text('>_ SSH 终端'),
         actions: [
-          ValueListenableBuilder<int>(
+          if (_assistant == 'codex') ValueListenableBuilder<int>(
             valueListenable: NotificationService.historyRevision,
             builder: (context, _, __) {
               final unread = StorageService.getCodexCompletionNotices()
@@ -113,7 +117,24 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
         ],
       ),
-      body: ValueListenableBuilder<Set<String>>(
+      body: Column(children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+          child: SizedBox(width: double.infinity, child: SegmentedButton<String>(
+            key: const ValueKey('home-assistant-mode'),
+            segments: const [
+              ButtonSegment(value: 'codex', label: Text('Codex'), icon: Icon(Icons.code)),
+              ButtonSegment(value: 'claude', label: Text('Claude'), icon: Icon(Icons.auto_awesome)),
+            ],
+            selected: {_assistant},
+            onSelectionChanged: (selection) async {
+              setState(() => _assistant = selection.single);
+              await StorageService.setHomeAssistant(_assistant);
+              if (mounted) unawaited(_preloadIfVisible());
+            },
+          )),
+        ),
+        Expanded(child: ValueListenableBuilder<Set<String>>(
         valueListenable: SshService.activeSessionsNotifier,
         builder: (context, activeSessions, _) {
           return ValueListenableBuilder(
@@ -165,7 +186,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             },
           );
         },
-      ),
+      )),
+      ]),
       floatingActionButton: Container(
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(28),
@@ -234,9 +256,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => CodexConversationPickerScreen(
-          connection: connection,
-        ),
+        settings: RouteSettings(name: '/assistant/$_assistant'),
+        builder: (_) => _assistant == 'claude'
+            ? ClaudeConversationPickerScreen(connection: connection)
+            : CodexConversationPickerScreen(connection: connection),
       ),
     );
   }

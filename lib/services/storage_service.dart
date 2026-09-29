@@ -230,6 +230,27 @@ class StorageService {
 
   static Box get _settingsBox => Hive.box(_settingsBoxName);
 
+  static String getHomeAssistant() {
+    if (!Hive.isBoxOpen(_settingsBoxName)) return 'codex';
+    return _settingsBox.get('home_assistant') == 'claude' ? 'claude' : 'codex';
+  }
+
+  static Future<void> setHomeAssistant(String value) =>
+      _settingsBox.put('home_assistant', value);
+
+  static String getCodexViewerLogLevel() {
+    if (!Hive.isBoxOpen(_settingsBoxName)) return 'terminal';
+    final value = _settingsBox.get('codex_viewer_log_level_v1');
+    return const ['conversation', 'terminal', 'full'].contains(value)
+        ? value as String : 'terminal';
+  }
+
+  static Future<void> setCodexViewerLogLevel(String value) async {
+    if (Hive.isBoxOpen(_settingsBoxName)) {
+      await _settingsBox.put('codex_viewer_log_level_v1', value);
+    }
+  }
+
   static const _codexCompletionNoticesKey = 'codex_completion_notices';
 
   static String _codexConversationViewedPrefix(String connectionId) =>

@@ -6,16 +6,18 @@ import '../theme/app_theme.dart';
 
 /// 对话正文共用的 Markdown 样式，宽表格在消息内横向滚动。
 class ChatMarkdown extends StatelessWidget {
-  const ChatMarkdown(this.data, {super.key, this.style});
+  const ChatMarkdown(this.data, {super.key, this.style, this.onTapLink});
 
   final String data;
   final TextStyle? style;
+  final MarkdownTapLinkCallback? onTapLink;
 
   @override
   Widget build(BuildContext context) {
     final textStyle = DefaultTextStyle.of(context).style.merge(style);
     return MarkdownBody(
       data: data,
+      onTapLink: onTapLink,
       inlineSyntaxes: [_ChineseStrongSyntax()],
       selectable: true,
       styleSheet: MarkdownStyleSheet.fromTheme(Theme.of(context)).copyWith(

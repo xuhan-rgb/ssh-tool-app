@@ -1,6 +1,6 @@
 import 'dart:typed_data';
 
-import 'ssh_service.dart';
+import 'remote_file_service.dart';
 
 class RemoteImageReference {
   const RemoteImageReference(this.path, this.end, {this.embedded = false});
@@ -81,41 +81,11 @@ class RemoteImageService {
     required String connectionId,
     required String workDir,
     required String path,
-  }) async {
-    final client = SshService.getClient(connectionId);
-    if (client == null) throw StateError('SSH 连接已断开');
-
-    var home = '';
-    if (path.startsWith('~/') || workDir == '~') {
-      home = String.fromCharCodes(await client.run('printf %s "\$HOME"'));
-    }
-    final base = workDir == '~' ? home : workDir;
-    final absolutePath = path.startsWith('~/')
-        ? '$home/${path.substring(2)}'
-        : path.startsWith('/')
-            ? path
-            : '$base/$path';
-
-    final sftp = await client.sftp();
-    try {
-      final attrs = await sftp.stat(absolutePath);
-      if (attrs.size != null && attrs.size! > maxImageBytes) {
-        throw StateError('图片超过 8 MB，无法预览');
-      }
-      final file = await sftp.open(absolutePath);
-      try {
-        final bytes = await file.readBytes(
-          length: attrs.size ?? maxImageBytes + 1,
-        );
-        if (bytes.length > maxImageBytes) {
-          throw StateError('图片超过 8 MB，无法预览');
-        }
-        return bytes;
-      } finally {
-        await file.close();
-      }
-    } finally {
-      sftp.close();
-    }
-  }
+  }) => RemoteFileService.read(
+    connectionId: connectionId,
+    workDir: workDir,
+    path: path,
+    maxBytes: maxImageBytes,
+    tooLargeMessage: '图片超过 8 MB，无法预览',
+  );
 }

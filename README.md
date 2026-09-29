@@ -6,8 +6,11 @@
 
 - 保存 SSH 连接，并通过终端和 tmux 会话操作远程主机。
 - 浏览和继续远程 Codex 对话，也可以新建对话、切换文字聊天与终端模式；首页会预加载常用对话，列表可刷新。
+- 首页可切换 Codex / Claude，默认 Codex。Claude 与 Codex 共用对话列表和查看组件，支持目录/时间筛选、收藏、新建、继续、模型/思考强度设置及三档日志；受管理的对话复用同一个 tmux 中的 Claude 实例，手机与电脑可连接同一终端。
+- Claude 消息和回执保存在远端 `~/.ssh_tool/claude_runtime/`，忙时排队，收到提交 hook 后才标记接收；不使用中断键。权限/信任确认需打开终端处理，未确认的提交不会自动重发。已有外部 Claude 实例不会被自动恢复为第二个副本。
 - 展示 Codex 运行任务，以及最近 24 小时内完成的任务；系统通知和应用内完成记录都支持未读状态。
 - 对话支持 Markdown、代码和表格显示；宽表格可以横向滚动。
+- 查看远程对话支持“只看对话 / 终端视图 / 完整日志”，默认终端视图显示执行摘要、文件差异与日志中的进度标题，并保留模型和思考强度。所选档位会保存在本机；对话记录在当前应用进程内缓存，重新打开时继续刷新远程记录。
 - 对话发送会先重新查询远端运行状态：运行中使用 `turn/steer` 补充当前任务；空闲或已完成使用 `codex queue --thread --message` 排队。无需手动选择路线，不调用 `turn/start`，不发送中断指令。
 - Steer 需要目标终端由共享 app-server 承载，通过 `$CODEX_HOME/app-server-control/app-server-control.sock` 访问当前会话（`CODEX_HOME` 默认 `~/.codex`）。旧独立终端运行中无法直接接入时会提示原因并保留草稿，不中断任务、不自动降级为 Queue；任务结束后再次发送会重新查询状态。
 - 点击发送后立即显示消息正文及发送状态。退出再打开对话会恢复当前应用进程内的待处理消息；远程日志确认收到后合并为正式消息，避免重复显示。
@@ -17,7 +20,7 @@
 
 本项目使用 Flutter 3.38.6 和其捆绑的 Dart。Android 构建验证环境为 JDK 17、Android Gradle Plugin 8.9.1 和 Gradle 8.12。Android 的 `compileSdk` 与 NDK 版本沿用 Flutter 默认值；首次构建会由 Flutter/Gradle 下载所需组件。首次构建前需安装 Android SDK Command-line Tools 并接受 Android SDK 许可证。
 
-连接目标主机需要可用的 SSH 服务。tmux 工作区需要远端安装 `tmux`；Codex 对话功能需要远端安装 Python 3，以及已完成认证的 Codex CLI，SSH 登录账号还需要有权读取对应的 Codex 会话数据。排队发送和 Goal 读取取决于远端 CLI 版本及其功能，并非所有 Codex 安装都支持。
+连接目标主机需要可用的 SSH 服务。tmux 工作区需要远端安装 `tmux`；Codex 对话功能需要远端安装 Python 3，以及已完成认证的 Codex CLI，SSH 登录账号还需要有权读取对应的 Codex 会话数据。排队发送和 Goal 读取取决于远端 CLI 版本及其功能，并非所有 Codex 安装都支持。Claude 功能需要远端 Python 3、tmux 和已配置认证的 Claude CLI；运行控制依赖 `--settings` hooks 和 `claude agents --json`，已在 Claude Code 2.1.274 验证。Claude 当前在整轮回复结束后派发下一条排队消息，不提供 Codex 的 `turn/steer` 协议。
 
 主要目录：
 

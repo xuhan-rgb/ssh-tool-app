@@ -16,6 +16,7 @@ import '../theme/app_theme.dart';
 import '../widgets/chat_markdown.dart';
 import '../widgets/codex_goal_card.dart';
 import 'remote_html_preview_screen.dart';
+import 'remote_file_preview_screen.dart';
 
 class CodexChatScreen extends StatefulWidget {
   final SshConnection connection;
@@ -752,14 +753,18 @@ class _CodexChatScreenState extends State<CodexChatScreen>
     );
   }
 
+  Widget _markdown(String text) => ChatMarkdown(text,
+    onTapLink: (_, href, __) => openRemoteFileLink(context,
+      connectionId: widget.connection.id, workDir: _workDir, href: href));
+
   List<Widget> _messageContent(String text, bool isUser) {
-    if (isUser) return [ChatMarkdown(text)];
+    if (isUser) return [_markdown(text)];
     final references = RemoteImageService.inlineReferences(text);
-    if (references.isEmpty) return [ChatMarkdown(text)];
+    if (references.isEmpty) return [_markdown(text)];
     final linked = references.where((reference) => !reference.embedded).toList();
     if (references.length >= 3) {
       return [
-        ChatMarkdown(text),
+        _markdown(text),
         Padding(
           padding: const EdgeInsets.only(top: 8),
           child: OutlinedButton.icon(
@@ -776,12 +781,12 @@ class _CodexChatScreenState extends State<CodexChatScreen>
     var start = 0;
     for (final reference in embedded) {
       final before = text.substring(start, reference.end);
-      if (before.trim().isNotEmpty) content.add(ChatMarkdown(before));
+      if (before.trim().isNotEmpty) content.add(_markdown(before));
       content.add(_imagePreview(reference.path));
       start = reference.end;
     }
     final remaining = text.substring(start);
-    if (remaining.trim().isNotEmpty) content.add(ChatMarkdown(remaining));
+    if (remaining.trim().isNotEmpty) content.add(_markdown(remaining));
     if (linked.isNotEmpty) {
       content.add(Padding(
         padding: const EdgeInsets.only(top: 8),
@@ -1070,7 +1075,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
                                     if (_streamedAnswer.isNotEmpty)
                                       Padding(
                                         padding: const EdgeInsets.only(top: 8),
-                                        child: ChatMarkdown(_streamedAnswer),
+                                        child: _markdown(_streamedAnswer),
                                       ),
                                   ],
                                 ),

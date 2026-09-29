@@ -1610,8 +1610,9 @@ void main() {
     expect(find.text('历史消息 0'), findsNothing);
   });
 
-  testWidgets('aborted conversation shows messages before full event log',
+  testWidgets('aborted conversation supports three log levels',
       (tester) async {
+    await tester.runAsync(() => Hive.box('settings').close());
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -1642,16 +1643,21 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.text('查看图片'), findsOneWidget);
-    expect(find.text('任务中止：interrupted'), findsNothing);
+    expect(find.text('任务中止：interrupted'), findsOneWidget);
     expect(find.text('大量工具输出'), findsNothing);
 
     await tester.tap(find.byKey(const ValueKey('viewer-log-toggle')));
-    await tester.pump();
-    expect(find.text('任务中止：interrupted'), findsOneWidget);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('完整日志').last);
+    await tester.pumpAndSettle();
+    expect(find.text('大量工具输出'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('viewer-log-toggle')));
-    await tester.pump();
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('只看对话').last);
+    await tester.pumpAndSettle();
     expect(find.text('查看图片'), findsOneWidget);
     expect(find.text('任务中止：interrupted'), findsNothing);
+    await tester.runAsync(() => Hive.openBox('settings'));
   });
 
   testWidgets('resume uses the selected conversation directory',

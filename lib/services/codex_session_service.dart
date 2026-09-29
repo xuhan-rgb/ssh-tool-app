@@ -114,12 +114,20 @@ class CodexConversationRecord {
   final DateTime? timestamp;
   final String text;
   final CodexTokenUsage? tokenUsage;
+  final String? reasoningEffort;
+  final String? model;
+  final String? terminalSummary;
+  final String? terminalDetails;
 
   const CodexConversationRecord({
     required this.kind,
     required this.timestamp,
     required this.text,
     this.tokenUsage,
+    this.reasoningEffort,
+    this.model,
+    this.terminalSummary,
+    this.terminalDetails,
   });
 }
 
@@ -204,6 +212,16 @@ class CodexConversationParser {
             kind: json['kind'] as String? ?? 'other',
             timestamp: DateTime.tryParse(json['timestamp'] as String? ?? ''),
             text: text,
+            model: json['model'] is String ? (json['model'] as String).trim() : null,
+            terminalSummary: json['terminalSummary'] is String
+                ? json['terminalSummary'] as String
+                : null,
+            terminalDetails: json['terminalDetails'] is String
+                ? json['terminalDetails'] as String
+                : null,
+            reasoningEffort: json['reasoningEffort'] is String
+                ? (json['reasoningEffort'] as String).trim()
+                : null,
             tokenUsage: switch (json['tokenUsage']) {
               {'input_tokens': int input, 'output_tokens': int output} =>
                 CodexTokenUsage(
@@ -1330,7 +1348,26 @@ def text_from_content(content):
         for part in content:
             if isinstance(part, dict) and isinstance(part.get("text"), str):
                 parts.append(part["text"])
-    return "".join(parts).strip()
+    return "\n".join(parts).strip()
+
+
+def first_heading(value):
+    import re
+    match = re.search(r"\*\*(.+?)\*\*", value)
+    return match.group(1).strip() if match else None
+
+
+def command_label(command):
+    if isinstance(command, list):
+        command = command[-1] if len(command) >= 3 and command[1] == "-lc" else " ".join(str(part) for part in command)
+    lines = str(command or "command").strip().splitlines()
+    return (lines[0] if lines else "command")[:200] + (" …" if len(lines) > 1 else "")
+
+
+def diff_counts(diff):
+    added = sum(1 for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    deleted = sum(1 for line in diff.splitlines() if line.startswith("-") and not line.startswith("---"))
+    return added, deleted
 
 
 if not sessions_dir.is_dir():
@@ -1338,8 +1375,15 @@ if not sessions_dir.is_dir():
 
 for path in sessions_dir.rglob(f"*-{thread_id}.jsonl"):
     records = []
+    calls = {}
+    session_calls = {}
     last_assistant = None
+    reasoning_texts = set()
+    turn_number = 0
+    structured_by_turn = {}
     last_usage = None
+    reasoning_effort = None
+    model = None
     try:
         with path.open(encoding="utf-8") as stream:
             for line in stream:
@@ -1356,7 +1400,16 @@ for path in sessions_dir.rglob(f"*-{thread_id}.jsonl"):
 
                 kind = None
                 text = ""
-                if item.get("type") == "response_item":
+                terminal_summary = None
+                terminal_details = None
+                if item.get("type") == "turn_context":
+                    model_value = payload.get("model")
+                    model = model_value.strip() if isinstance(model_value, str) and model_value.strip() else None
+                    effort = payload.get("effort")
+                    reasoning_effort = effort.strip() if isinstance(effort, str) and effort.strip() else None
+                    kind, text = "turn_context", "模型：" + (model or "未知") + " · 思考强度：" + (reasoning_effort or "未知")
+                    terminal_summary = text
+                elif item.get("type") == "response_item":
                     payload_type = payload.get("type")
                     if payload_type == "message" and payload.get("role") in ("user", "assistant"):
                         kind = payload.get("role")
@@ -1368,19 +1421,183 @@ for path in sessions_dir.rglob(f"*-{thread_id}.jsonl"):
                             for part in payload.get("summary", [])
                             if isinstance(part, dict)
                         ).strip()
-                    elif payload_type == "custom_tool_call":
+                        import re
+                        heading = re.search(r"\*\*(.+?)\*\*", text)
+                        terminal_summary = heading.group(1).strip() if heading else None
+                        if text in reasoning_texts:
+                            kind = None
+                        else:
+                            reasoning_texts.add(text)
+                    elif payload_type in ("custom_tool_call", "function_call"):
                         kind = "tool_call"
-                        text = "tool: " + str(payload.get("name", "unknown")) + "\n" + str(payload.get("input", ""))
-                    elif payload_type == "custom_tool_call_output":
+                        tool_name = payload.get("name") or payload.get("tool") or "tool"
+                        normalized_tool = str(tool_name).split(".")[-1]
+                        raw_input = payload.get("input", payload.get("arguments", ""))
+                        original_input = raw_input if isinstance(raw_input, str) else json.dumps(raw_input, ensure_ascii=False)
+                        parsed_input = raw_input
+                        if isinstance(raw_input, str):
+                            try: parsed_input = json.loads(raw_input)
+                            except Exception: pass
+                        command = (parsed_input.get("cmd") or parsed_input.get("command") or original_input) if isinstance(parsed_input, dict) else original_input
+                        input_text = original_input
+                        text = "tool: " + str(tool_name) + "\n" + input_text
+                        command = str(command).strip()
+                        is_shell = normalized_tool in ("shell", "exec_command", "bash")
+                        label = command.splitlines()[0][:200] if is_shell and command else normalized_tool
+                        terminal_summary = "Running " + (label if is_shell else str(tool_name))
+                        wrapper_source = "exec" if normalized_tool == "exec" else ("command" if normalized_tool in ("shell", "exec_command", "bash") else ("file" if normalized_tool == "apply_patch" else None))
+                        call_id = payload.get("call_id") or payload.get("id")
+                        if call_id:
+                            parent = session_calls.get(str(parsed_input.get("session_id"))) if normalized_tool == "write_stdin" and isinstance(parsed_input, dict) else None
+                            calls[str(call_id)] = {"record": None, "tool": normalized_tool, "command": command, "label": label, "parent": parent, "wrapperSource": wrapper_source}
+                    elif payload_type in ("custom_tool_call_output", "function_call_output"):
                         kind = "tool_output"
-                        output = payload.get("output", "")
+                        output = payload.get("output", payload.get("result", ""))
                         text = output if isinstance(output, str) else json.dumps(output, ensure_ascii=False)
+                        readable_output = text_from_content(output) if isinstance(output, list) else text
+                        call_id = payload.get("call_id")
+                        matched = calls.get(str(call_id)) if call_id else None
+                        if matched:
+                            import re
+                            parsed = output if isinstance(output, dict) else None
+                            if parsed is None and isinstance(output, str):
+                                try: parsed = json.loads(output)
+                                except Exception: pass
+                            exit_code = parsed.get("exit_code") if isinstance(parsed, dict) else None
+                            if exit_code is None and isinstance(parsed, dict) and isinstance(parsed.get("metadata"), dict):
+                                exit_code = parsed["metadata"].get("exit_code")
+                            if exit_code is None:
+                                found = re.search(r"Process exited with code (-?\d+)", text)
+                                if found: exit_code = int(found.group(1))
+                            if isinstance(exit_code, (int, float)) and not isinstance(exit_code, bool):
+                                exit_code = int(exit_code)
+                            else:
+                                exit_code = None
+                            details = text
+                            if isinstance(output, list):
+                                details = readable_output
+                            if isinstance(parsed, dict):
+                                display_output = parsed.get("output", parsed.get("stdout"))
+                                details = display_output if isinstance(display_output, str) else ""
+                            elif isinstance(output, str):
+                                transport = re.match(r"(?s)^(?:Chunk ID:|Wall time:|Process exited with code |Process running with session ID )", output)
+                                if transport:
+                                    final_output = re.search(r"(?m)^(?:Final output|Output):\s*", output)
+                                    if final_output:
+                                        details = output[final_output.end():]
+                                    else:
+                                        details = ""
+                            running_match = re.search(r"Process running with session ID\s+(\S+)", text)
+                            if session_id := (parsed.get("session_id") if isinstance(parsed, dict) else None):
+                                pass
+                            elif running_match:
+                                session_id = running_match.group(1)
+                            target = matched.get("parent") or matched
+                            if session_id and matched["tool"] == "exec_command":
+                                session_calls[str(session_id)] = matched
+                                target["details"] = details
+                                target["record"]["terminalSummary"] = "Running " + matched["label"]
+                                target["record"]["terminalDetails"] = details[:12000]
+                            elif matched["tool"] == "write_stdin" and matched.get("parent") is not None:
+                                if exit_code is not None:
+                                    prefix = "Ran " if int(exit_code) == 0 else "Failed (exit %s) " % exit_code
+                                    target["record"]["terminalSummary"] = prefix + target["label"]
+                                    previous = target.get("details", "")
+                                    target["details"] = previous + (("\n" if previous and details else "") + details)
+                                    target["record"]["terminalDetails"] = target["details"][-12000:]
+                                else:
+                                    target["record"]["terminalSummary"] = "Running " + target["label"]
+                                    previous = target.get("details", "")
+                                    target["details"] = previous + (("\n" if previous and details else "") + details)
+                                    target["record"]["terminalDetails"] = target["details"][-12000:]
+                            elif exit_code is None and isinstance(parsed, dict) and parsed.get("session_id"):
+                                matched["record"]["terminalSummary"] = "Running " + (matched["command"] or matched["tool"])
+                            elif matched["tool"] == "apply_patch":
+                                succeeded = exit_code == 0 or (exit_code is None and ("Done!" in text or "Success" in text))
+                                failed = (exit_code is not None and int(exit_code) != 0) or (isinstance(parsed, dict) and parsed.get("is_error") is True) or "Error:" in text
+                                summary = "Edited %d files (+%d -%d)" % (len(matched["paths"]), matched["added"], matched["deleted"])
+                                matched["record"]["terminalSummary"] = summary if succeeded else ("Failed: " + summary if failed else "Apply patch status unknown")
+                                matched["record"]["terminalDetails"] = (matched["patch"] + ("\n" if matched["patch"] and details else "") + details)[:12000]
+                            elif exit_code is not None:
+                                prefix = "Ran " if int(exit_code) == 0 else "Failed (exit %s) " % exit_code
+                                target["record"]["terminalSummary"] = prefix + target["label"]
+                                target["record"]["terminalDetails"] = details[:12000]
+                            else:
+                                matched["record"]["terminalSummary"] = "Finished " + matched["tool"] + " (status unknown)"
+                                matched["record"]["terminalDetails"] = details[:12000]
+                            terminal_summary = None
+                        else:
+                            terminal_summary = readable_output.splitlines()[0][:200] if readable_output.strip() else "Tool completed"
                 elif item.get("type") == "event_msg":
                     event_type = payload.get("type")
-                    if event_type == "task_started":
+                    if event_type == "item_completed":
+                        completed = payload.get("item") or {}
+                        if isinstance(completed, dict):
+                            completed_type = completed.get("type")
+                            terminal_source = None
+                            text = json.dumps(completed, ensure_ascii=False)
+                            if completed_type == "CommandExecution":
+                                kind = "tool_call"
+                                label = command_label(completed.get("command"))
+                                exit_code = completed.get("exit_code")
+                                if isinstance(exit_code, (int, float)) and not isinstance(exit_code, bool):
+                                    exit_code = int(exit_code)
+                                    terminal_summary = ("Ran " if exit_code == 0 else "Failed (exit %s) " % exit_code) + label
+                                elif completed.get("status") in ("completed", "complete"):
+                                    terminal_summary = "Ran " + label
+                                else:
+                                    terminal_summary = "Finished command (status unknown)"
+                                detail = completed.get("aggregated_output")
+                                if not isinstance(detail, str):
+                                    detail = "\n".join(part for part in (completed.get("stdout"), completed.get("stderr")) if isinstance(part, str) and part)
+                                if not detail:
+                                    detail = completed.get("formatted_output")
+                                terminal_details = detail[:12000] if detail else None
+                                terminal_source = "command"
+                            elif completed_type == "FileChange":
+                                kind = "tool_call"
+                                changes = completed.get("changes") if isinstance(completed.get("changes"), dict) else {}
+                                details = []
+                                added = deleted = 0
+                                for file_path, change in changes.items():
+                                    if not isinstance(change, dict):
+                                        continue
+                                    change_type = str(change.get("type", "update")).lower()
+                                    verb = "Add" if "add" in change_type or "create" in change_type else ("Delete" if "delete" in change_type or "remove" in change_type else "Update")
+                                    diff = change.get("unified_diff") if isinstance(change.get("unified_diff"), str) else ""
+                                    plus, minus = diff_counts(diff)
+                                    added += plus
+                                    deleted += minus
+                                    details.append("*** %s File: %s\n%s" % (verb, file_path, diff))
+                                terminal_summary = "Edited %d files (+%d -%d)" % (len(changes), added, deleted) if completed.get("status") in ("completed", "complete") else "File changes (status unknown)"
+                                terminal_details = "\n".join(details)[:12000] if details else None
+                                terminal_source = "file"
+                            elif completed_type == "SubAgentActivity":
+                                kind = "tool_call"
+                                terminal_summary = "Interacted with " + str(completed.get("agent_path") or "subagent")
+                            elif completed_type == "Reasoning":
+                                summary = completed.get("summary_text", [])
+                                summary_text = "\n".join(str(part.get("text", "")) if isinstance(part, dict) else str(part) for part in summary).strip() if isinstance(summary, list) else str(summary).strip()
+                                if summary_text and summary_text not in reasoning_texts:
+                                    kind = "reasoning"
+                                    text = summary_text
+                                    reasoning_texts.add(summary_text)
+                                    terminal_summary = first_heading(summary_text)
+                            if kind and text.strip():
+                                record = {"kind": kind, "timestamp": timestamp, "text": text[:12000], "reasoningEffort": reasoning_effort, "model": model, "terminalSummary": terminal_summary, "terminalDetails": terminal_details, "_turn": turn_number, "_structured": terminal_source}
+                                records.append(record)
+                                if terminal_source:
+                                    structured_by_turn.setdefault(turn_number, set()).add(terminal_source)
+                                kind = None
+                    elif event_type == "task_started":
+                        turn_number += 1
+                        reasoning_effort = None
+                        model = None
                         last_assistant = None
                         last_usage = None
+                        reasoning_texts = set()
                         kind, text = "task_started", "任务开始"
+                        terminal_summary = text
                     elif event_type == "token_count":
                         info = payload.get("info") or {}
                         if isinstance(info, dict) and isinstance(info.get("last_token_usage"), dict):
@@ -1389,18 +1606,63 @@ for path in sessions_dir.rglob(f"*-{thread_id}.jsonl"):
                         if last_assistant is not None and last_usage is not None:
                             last_assistant["tokenUsage"] = last_usage
                         kind, text = "task_complete", "任务完成"
+                        terminal_summary = text
                     elif event_type == "turn_aborted":
                         kind, text = "turn_aborted", "任务中止：" + str(payload.get("reason", "未知原因"))
+                        terminal_summary = text
+                    elif event_type == "agent_reasoning":
+                        summary = payload.get("text") or payload.get("summary")
+                        if isinstance(summary, str) and summary.strip():
+                            kind, text = "reasoning", summary.strip()
+                            import re
+                            heading = re.search(r"\*\*(.+?)\*\*", text)
+                            terminal_summary = heading.group(1).strip() if heading else None
+                            if text in reasoning_texts:
+                                kind = None
+                            else:
+                                reasoning_texts.add(text)
 
                 if kind and text.strip():
                     record = {
                         "kind": kind,
                         "timestamp": timestamp,
                         "text": text[:12000],
+                        "reasoningEffort": reasoning_effort,
+                        "model": model,
+                        "terminalSummary": terminal_summary,
+                        "terminalDetails": terminal_details,
                     }
+                    if kind == "tool_call":
+                        call_id = payload.get("call_id") or payload.get("id")
+                        if call_id:
+                            entry = calls[str(call_id)]
+                            entry["record"] = record
+                            entry["patch"] = text.split("\n", 1)[1] if entry["tool"] == "apply_patch" and "\n" in text else ""
+                            import re
+                            entry["paths"] = re.findall(r"(?m)^\*\*\*(?: Add| Update| Delete) File: (.+)$", entry["patch"])
+                            entry["added"] = sum(1 for row in entry["patch"].splitlines() if row.startswith("+") and not row.startswith("+++"))
+                            entry["deleted"] = sum(1 for row in entry["patch"].splitlines() if row.startswith("-") and not row.startswith("---"))
+                            if entry["tool"] == "write_stdin":
+                                record["terminalSummary"] = None
+                                record["terminalDetails"] = None
+                            elif entry["tool"] == "apply_patch":
+                                record["terminalSummary"] = "Editing"
+                                record["terminalDetails"] = entry["patch"][:12000]
+                            if entry.get("wrapperSource"):
+                                record["_wrapperSource"] = entry["wrapperSource"]
+                                record["_turn"] = turn_number
                     records.append(record)
                     if kind == "assistant":
                         last_assistant = record
+        for item in records:
+            wrapper = item.get("_wrapperSource")
+            available = structured_by_turn.get(item.get("_turn"), set())
+            if (wrapper == "command" and "command" in available) or (wrapper == "file" and "file" in available) or (wrapper == "exec" and available.intersection(("command", "file"))):
+                item["terminalSummary"] = None
+                item["terminalDetails"] = None
+            item.pop("_wrapperSource", None)
+            item.pop("_turn", None)
+            item.pop("_structured", None)
         for item in records[-300:]:
             print(json.dumps(item, ensure_ascii=False))
     except Exception:
