@@ -25,7 +25,7 @@ void main() {
           'cwd': '/work/project',
           'title': 'Shared layout',
           'updatedAt': '2026-09-29T01:00:00Z',
-          'state': 'complete',
+          'state': 'unknown',
           'preview': 'Visible preview',
         });
   });
@@ -55,8 +55,10 @@ void main() {
     expect(find.byType(CodexSessionDialog), findsOneWidget);
     expect(find.text('对话'), findsOneWidget);
     expect(find.byKey(const ValueKey('favorites-section-tab')), findsOneWidget);
-    expect(find.text('全部时间'), findsOneWidget);
+    expect(find.text('时间筛选'), findsOneWidget);
     expect(find.text('Visible preview'), findsOneWidget);
+    expect(find.text('状态未知'), findsOneWidget);
+    expect(find.text('日志读取失败'), findsNothing);
     expect(find.byKey(const ValueKey('conversation-directory-/work/project')), findsOneWidget);
     expect(find.text('继续对话'), findsOneWidget);
     expect(find.byTooltip('恢复对话'), findsNothing);

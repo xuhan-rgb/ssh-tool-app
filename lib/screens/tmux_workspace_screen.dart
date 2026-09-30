@@ -279,18 +279,14 @@ class CodexSessionConfig {
 enum _CodexTimeFilter {
   all,
   today,
-  yesterday,
   lastSevenDays,
-  lastThirtyDays,
 }
 
 extension _CodexTimeFilterLabel on _CodexTimeFilter {
   String get label => switch (this) {
         _CodexTimeFilter.all => '全部时间',
         _CodexTimeFilter.today => '今天',
-        _CodexTimeFilter.yesterday => '昨天',
         _CodexTimeFilter.lastSevenDays => '近 7 天',
-        _CodexTimeFilter.lastThirtyDays => '近 30 天',
       };
 }
 
@@ -310,6 +306,7 @@ class CodexSessionDialog extends StatefulWidget {
       loadConversations;
   final Future<List<CodexConversation>> Function()? loadAllConversations;
   final Future<List<CodexConversation>> Function()? loadRunningConversations;
+  final Future<List<CodexConversation>> Function()? loadRemoteOpenConversations;
   final Future<List<CodexConversation>> Function(int offset)?
       loadMoreConversations;
   final List<CodexConversation> initialConversations;
@@ -320,6 +317,7 @@ class CodexSessionDialog extends StatefulWidget {
   final Future<RemoteDirectoryListing> Function(String path) loadDirectories;
   final Future<List<OpenedCodexSession>> Function()? loadOpenedSessions;
   final Future<Map<String, String>> Function()? loadRunningChatJobs;
+  final Future<Set<String>> Function()? loadOpenChatSessions;
   final Future<String?> Function(String conversationId)? findRunningChatJob;
   final bool? initialOpenAsChat;
   final void Function(bool)? onOpenModeChanged;
@@ -343,6 +341,7 @@ class CodexSessionDialog extends StatefulWidget {
     required this.loadConversations,
     this.loadAllConversations,
     this.loadRunningConversations,
+    this.loadRemoteOpenConversations,
     this.loadMoreConversations,
     this.initialConversations = const [],
     this.onConversationsLoaded,
@@ -351,6 +350,7 @@ class CodexSessionDialog extends StatefulWidget {
     required this.loadDirectories,
     this.loadOpenedSessions,
     this.loadRunningChatJobs,
+    this.loadOpenChatSessions,
     this.findRunningChatJob,
     this.initialOpenAsChat,
     this.onOpenModeChanged,
@@ -392,6 +392,11 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
   bool _loadingConversations = true;
   bool _loadingOlderConversations = false;
   bool _runningOnly = false;
+  bool _remoteOpenOnly = false;
+  Set<String> _openChatSessions = {};
+  bool _loadingRemoteOpen = false;
+  List<CodexConversation>? _remoteOpenConversations;
+  String? _remoteOpenError;
   bool _loadingRunning = false;
   bool _preloadingRecords = false;
   bool _preloadRecordsPending = false;
@@ -404,6 +409,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
   int _directoryRequest = 0;
   int _conversationRequest = 0;
   Timer? _statusRefreshTimer;
+  int _statusRefreshTicks = 0;
   bool _statusRefreshInFlight = false;
   bool _attachingRunningChat = false;
   bool _showHiddenDirectories = false;
@@ -422,9 +428,11 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     final id = _selectedConversationId;
     if (id == null) return null;
     for (final conversation in [
-      ..._conversationSource(false),
+      ...?_remoteOpenConversations,
+      ...?_runningConversations,
+      ..._conversations,
     ]) {
-      if (conversation.id == id) return conversation;
+      if (conversation.id == id) return _withLatestRemoteStatus(conversation);
     }
     return null;
   }
@@ -444,7 +452,8 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
 
   bool _isAppConversation(CodexConversation conversation) =>
       _isOpenedConversation(conversation) ||
-      _runningChatJobs.containsKey(conversation.id);
+      (_runningChatJobs.containsKey(conversation.id) ||
+          _openChatSessions.contains(conversation.id));
 
   bool _isRecentCompleted(CodexConversation conversation) {
     final completedAt = conversation.completedAt ?? conversation.updatedAt;
@@ -464,7 +473,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     if (notices.any((notice) => !notice.read)) return true;
     final viewedAt = StorageService.getCodexConversationViewedAt(
         widget.connectionId, conversation.id);
-    if (viewedAt == null) return notices.isEmpty;
+    if (viewedAt == null) return false;
     return conversation.updatedAt?.isAfter(viewedAt) ?? false;
   }
 
@@ -473,7 +482,16 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
   }
 
   String _conversationStateLabel(CodexConversation conversation) {
-    if (_isUnreadCompleted(conversation)) return '已完成·未读';
+    if (!widget.isClaude && conversation.remoteOpen == true &&
+        conversation.state == CodexConversationState.notStarted) {
+      return '等待消息';
+    }
+    if (widget.isClaude && conversation.state == CodexConversationState.unknown) {
+      return '状态未知';
+    }
+    if (_isUnreadCompleted(conversation)) return '新回复';
+    if (!widget.isClaude && conversation.remoteOpen == true &&
+        conversation.state == CodexConversationState.complete) return '等待消息';
     if (conversation.state != CodexConversationState.running) {
       return conversation.state.label;
     }
@@ -482,9 +500,10 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     return conversation.state.label;
   }
 
-  bool _matchesConversationFilters(CodexConversation conversation) =>
+  bool _matchesConversationFilters(CodexConversation conversation,
+      {bool allDirectories = false}) =>
       _matchesTimeFilter(conversation) &&
-      _matchesDirectoryFilter(conversation.cwd);
+      (allDirectories || _matchesDirectoryFilter(conversation.cwd));
 
   bool _matchesDirectoryFilter(String path) =>
       _filteredDirectories.isEmpty ||
@@ -533,6 +552,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     _filteredDirectories = {...?widget.initialFilteredDirectories,
       if (!widget.isClaude) ...StorageService.getFilteredCodexDirectories(widget.connectionId)};
     _openAsChat = widget.initialOpenAsChat ?? (widget.isClaude ? true : StorageService.getCodexChatMode());
+    _remoteOpenOnly = !widget.isClaude && widget.loadRemoteOpenConversations != null;
     _workDir = widget.defaultWorkDir;
     _showAllConversations = widget.startWithAllConversations;
     unawaited(
@@ -546,9 +566,30 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     unawaited(_preloadRecentConversations());
     if (widget.loadOpenedSessions != null) unawaited(_loadOpenedSessions());
     if (widget.loadRunningChatJobs != null) unawaited(_loadRunningChatJobs());
+    unawaited(_loadOpenChatSessions());
+    if (_remoteOpenOnly) unawaited(_refreshRemoteOpenConversations());
     _statusRefreshTimer = Timer.periodic(
-      const Duration(seconds: 15),
-      (_) => unawaited(_refreshActiveConversationStates()),
+      Duration(seconds: widget.isClaude ? 15 : 5),
+      (_) {
+        final lifecycle = WidgetsBinding.instance.lifecycleState;
+        if (ModalRoute.of(context)?.isCurrent != true ||
+            (lifecycle != null && lifecycle != AppLifecycleState.resumed)) return;
+        if (!widget.isClaude) unawaited(_refreshRemoteOpenConversations());
+        _statusRefreshTicks++;
+        final latest = {
+          for (final item in [
+            ..._conversations,
+            ...?_runningConversations,
+            ...?_remoteOpenConversations,
+          ]) item.id: item,
+        };
+        final hasRunning = latest.values.map(_withLatestRemoteStatus).any((item) =>
+            item.state == CodexConversationState.running && item.remoteOpen != false);
+        if (widget.isClaude || hasRunning ||
+            _statusRefreshTicks >= 12) {
+          unawaited(_refreshActiveConversationStates());
+        }
+      },
     );
   }
 
@@ -562,6 +603,15 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
         _openedSessions = sessions;
         _openedSessionsKnown = true;
       });
+    } catch (_) {}
+  }
+
+  Future<void> _loadOpenChatSessions() async {
+    final loader = widget.loadOpenChatSessions;
+    if (loader == null) return;
+    try {
+      final sessions = await loader();
+      if (mounted) setState(() => _openChatSessions = sessions);
     } catch (_) {}
   }
 
@@ -596,6 +646,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     }
     final requestedWorkDir = _workDir;
     final request = ++_conversationRequest;
+    _statusRefreshTicks = 0;
     _statusRefreshInFlight = true;
     final runningRefresh = _refreshRunningConversations();
     try {
@@ -613,6 +664,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
         for (final conversation in conversations) conversation.id: conversation
       };
       setState(() {
+        _conversationError = null;
         _conversations = [
           ...conversations,
           if (_nextConversationOffset > 200)
@@ -622,7 +674,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       });
       unawaited(_preloadRecentConversations());
       await Future.wait([
-        _loadOpenedSessions(), _loadRunningChatJobs(), runningRefresh,
+        _loadOpenedSessions(), _loadRunningChatJobs(), _loadOpenChatSessions(), runningRefresh,
       ]);
     } catch (_) {
       // 后台检查失败时保留现有列表。
@@ -632,36 +684,93 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
   }
 
   List<CodexConversation> _conversationSource(bool favoritesOnly) =>
-      _runningOnly && !favoritesOnly
+      favoritesOnly
+          ? {
+              for (final conversation in [
+                ..._conversations,
+                ...?_runningConversations,
+                ...?_remoteOpenConversations,
+              ]) conversation.id: conversation,
+            }.values.toList()
+          : _remoteOpenOnly
+          ? (_remoteOpenConversations ?? _conversations)
+              .where((item) => item.remoteOpen == true).toList()
+          : _runningOnly && !favoritesOnly
           ? {
               for (final conversation in _conversations)
                 conversation.id: conversation,
               for (final conversation in _runningConversations ?? const <CodexConversation>[])
                 conversation.id: conversation,
             }.values.where((conversation) =>
-                conversation.state == CodexConversationState.running ||
-                _isRecentCompleted(conversation)).toList()
+                (widget.isClaude
+                    ? conversation.state == CodexConversationState.running || _isRecentCompleted(conversation)
+                    : _isUnreadCompleted(conversation))).toList()
           : _conversations;
 
+  CodexConversation _withLatestRemoteStatus(CodexConversation conversation) {
+    final opened = _remoteOpenConversations;
+    if (widget.isClaude || opened == null) return conversation;
+    for (final current in opened) {
+      if (current.id == conversation.id) return current;
+    }
+    if (conversation.remoteOpen != true) return conversation;
+    return CodexConversation(
+      id: conversation.id,
+      cwd: conversation.cwd,
+      updatedAt: conversation.updatedAt,
+      completedAt: conversation.completedAt,
+      title: conversation.title,
+      state: conversation.state == CodexConversationState.running
+          ? CodexConversationState.pending : conversation.state,
+      remoteOpen: false,
+      directoryExists: conversation.directoryExists,
+      preview: conversation.preview,
+      isSubagent: conversation.isSubagent,
+      parentConversationId: conversation.parentConversationId,
+    );
+  }
+
   List<CodexConversation> _filteredConversations(bool favoritesOnly) =>
-      _conversationSource(favoritesOnly).where((conversation) =>
-          _matchesConversationFilters(conversation) &&
+      _conversationSource(favoritesOnly).map(_withLatestRemoteStatus).where((conversation) =>
+          _matchesConversationFilters(conversation,
+              allDirectories: !favoritesOnly &&
+                  (_remoteOpenOnly || (_runningOnly && !widget.isClaude))) &&
           (!_runningOnly || favoritesOnly ||
-              conversation.state == CodexConversationState.running ||
-              _isRecentCompleted(conversation)) &&
+              (widget.isClaude
+                  ? conversation.state == CodexConversationState.running || _isRecentCompleted(conversation)
+                  : _isUnreadCompleted(conversation))) &&
           (!favoritesOnly || _favoriteConversations.contains(conversation.id)))
           .toList();
 
-  void _setRunningOnly(bool value) {
+  void _setRunningOnly(bool value, {bool remoteOpenOnly = false}) {
     setState(() {
       _runningOnly = value;
+      _remoteOpenOnly = remoteOpenOnly;
       if (!_filteredConversations(false)
           .any((item) => item.id == _selectedConversationId)) {
         _selectedConversationId = null;
       }
     });
     if (value) unawaited(_refreshRunningConversations());
+    if (remoteOpenOnly) unawaited(_refreshRemoteOpenConversations());
     unawaited(_preloadRecentConversations());
+  }
+
+  Future<void> _refreshRemoteOpenConversations() async {
+    final loader = widget.loadRemoteOpenConversations;
+    if (loader == null || _loadingRemoteOpen) return;
+    setState(() {
+      _loadingRemoteOpen = true;
+      _remoteOpenError = null;
+    });
+    try {
+      final conversations = await loader();
+      if (mounted) setState(() => _remoteOpenConversations = conversations);
+    } catch (error) {
+      if (mounted) setState(() => _remoteOpenError = error.toString());
+    } finally {
+      if (mounted) setState(() => _loadingRemoteOpen = false);
+    }
   }
 
   Future<void> _refreshRunningConversations() async {
@@ -1226,6 +1335,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       return;
     }
     final opened = conversation == null ||
+            conversation.remoteOpen == false ||
             stopWriterBeforeLaunch ||
             launch == CodexConversationLaunch.fork
         ? null
@@ -1233,7 +1343,8 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     if (conversation != null &&
         !(stopWriterBeforeLaunch || launch == CodexConversationLaunch.fork
             ? conversation.canTakeover
-            : conversation.canResume || opened != null)) {
+            : conversation.canResume || opened != null ||
+                (useChat && _openChatSessions.contains(conversation.id)))) {
       return;
     }
     Navigator.pop(
@@ -1277,11 +1388,19 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       if (mounted) unawaited(_refreshActiveConversationStates());
       return;
     }
-    var chosenPath = _workDir;
+    final favoritePaths = _favoriteDirectories.toList()..sort();
+    final currentPath = _selectedConversation?.cwd ?? _workDir;
+    var chosenPath = _favoriteDirectories.contains(currentPath)
+        ? currentPath
+        : _favoriteDirectories.contains(_workDir)
+            ? _workDir
+            : favoritePaths.firstOrNull ?? currentPath;
     var favorite = true;
-    var listingFuture = widget.loadDirectories(_workDir);
+    var listingFuture = widget.loadDirectories(chosenPath);
     String? error;
     bool creating = false;
+    bool browsing = false;
+    bool useChat = true;
     final selected = await showModalBottomSheet<({String path, bool favorite})>(
       context: context,
       isScrollControlled: true,
@@ -1293,88 +1412,138 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
             child: SizedBox(
               height: MediaQuery.sizeOf(context).height * 0.7,
               child: Column(children: [
-                const ListTile(
-                  title: Text('新建 Codex 对话'),
-                  subtitle: Text('选择远端工作目录；第一条消息成功后创建会话'),
+                ListTile(
+                  title: const Text('新建 Codex 对话'),
+                  subtitle: Text(useChat
+                      ? '先选目录，进入聊天后发送首条消息时启动远程 Codex'
+                      : '打开终端后，在所选目录启动远程 Codex'),
                 ),
-                KeyedSubtree(
-                  key: ValueKey(chosenPath),
-                  child: TextFormField(
-                    key: const ValueKey('new-conversation-directory'),
-                    initialValue: chosenPath,
-                    onChanged: (value) => chosenPath = value,
-                    decoration: const InputDecoration(
-                      labelText: '工作目录',
-                      prefixIcon: Icon(Icons.folder_outlined),
+                Card(
+                  key: const ValueKey('new-conversation-selected-directory'),
+                  color: AppTheme.cyan.withValues(alpha: 0.12),
+                  child: ListTile(
+                    leading: Icon(Icons.folder, color: AppTheme.cyan),
+                    title: const Text('工作目录'),
+                    subtitle: Text(chosenPath,
+                        maxLines: 1, overflow: TextOverflow.ellipsis),
+                    trailing: TextButton(
+                      key: const ValueKey('change-new-conversation-directory'),
+                      onPressed: () => updateSheet(() => browsing = !browsing),
+                      child: Text(browsing ? '收起' : '选择其他目录'),
                     ),
                   ),
                 ),
-                if (_favoriteDirectories.isNotEmpty)
-                  SizedBox(
-                    height: 52,
-                    child: ListView(
-                      scrollDirection: Axis.horizontal,
-                      children: [
-                        for (final path
-                            in _favoriteDirectories.toList()..sort())
-                          Padding(
-                            padding: const EdgeInsets.only(right: 6),
-                            child: ActionChip(
+                if (favoritePaths.isNotEmpty) ...[
+                  const Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text('收藏目录'),
+                  ),
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 110),
+                    child: SingleChildScrollView(
+                      child: Wrap(
+                        spacing: 6,
+                        children: [
+                          for (final path in favoritePaths)
+                            ChoiceChip(
+                              key: ValueKey('new-directory-favorite-$path'),
                               label: Text(path,
                                   maxLines: 1, overflow: TextOverflow.ellipsis),
-                              onPressed: () => updateSheet(() {
+                              selected: chosenPath == path,
+                              onSelected: (_) => updateSheet(() {
                                 chosenPath = path;
                                 listingFuture = widget.loadDirectories(path);
                               }),
                             ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
-                const SizedBox(height: 8),
-                Expanded(
-                  child: FutureBuilder<RemoteDirectoryListing>(
-                    future: listingFuture,
-                    builder: (context, snapshot) {
-                      if (!snapshot.hasData) {
-                        return const Center(child: CircularProgressIndicator());
-                      }
-                      final listing = snapshot.data!;
-                      if (listing.error != null) {
-                        return Center(child: Text(listing.error!));
-                      }
-                      return ListView(children: [
-                        ListTile(
-                          title: Text(listing.path,
-                              maxLines: 1, overflow: TextOverflow.ellipsis),
-                          trailing: TextButton(
-                            onPressed: () => updateSheet(() {
-                              chosenPath = listing.path;
-                            }),
-                            child: const Text('选择此目录'),
-                          ),
-                        ),
-                        if (listing.path != '/')
-                          ListTile(
-                            leading: const Icon(Icons.arrow_upward),
-                            title: const Text('上级目录'),
-                            onTap: () => updateSheet(() {
-                              listingFuture = widget
-                                  .loadDirectories(_parentPath(listing.path));
-                            }),
-                          ),
-                        for (final dir in listing.dirs)
-                          ListTile(
-                            leading: const Icon(Icons.folder_outlined),
-                            title: Text(dir),
-                            onTap: () => updateSheet(() {
-                              listingFuture = widget.loadDirectories(
-                                  _joinPath(listing.path, dir));
-                            }),
-                          ),
-                      ]);
-                    },
+                ],
+                if (browsing) ...[
+                  KeyedSubtree(
+                    key: ValueKey(chosenPath),
+                    child: TextFormField(
+                      key: const ValueKey('new-conversation-directory'),
+                      initialValue: chosenPath,
+                      onChanged: (value) => chosenPath = value,
+                      decoration: const InputDecoration(
+                        labelText: '输入目录路径',
+                        prefixIcon: Icon(Icons.folder_outlined),
+                      ),
+                    ),
                   ),
+                  const SizedBox(height: 8),
+                  Expanded(
+                    child: FutureBuilder<RemoteDirectoryListing>(
+                      future: listingFuture,
+                      builder: (context, snapshot) {
+                        if (!snapshot.hasData) {
+                          return const Center(
+                              child: CircularProgressIndicator());
+                        }
+                        final listing = snapshot.data!;
+                        if (listing.error != null) {
+                          return Center(child: Text(listing.error!));
+                        }
+                        return ListView(children: [
+                          ListTile(
+                            title: Text(listing.path,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis),
+                            trailing: TextButton(
+                              onPressed: () => updateSheet(() {
+                                chosenPath = listing.path;
+                              }),
+                              child: const Text('选择此目录'),
+                            ),
+                          ),
+                          if (listing.path != '/')
+                            ListTile(
+                              leading: const Icon(Icons.arrow_upward),
+                              title: const Text('上级目录'),
+                              onTap: () => updateSheet(() {
+                                listingFuture = widget.loadDirectories(
+                                    _parentPath(listing.path));
+                              }),
+                            ),
+                          for (final dir in listing.dirs)
+                            ListTile(
+                              leading: const Icon(Icons.folder_outlined),
+                              title: Text(dir),
+                              onTap: () => updateSheet(() {
+                                listingFuture = widget.loadDirectories(
+                                    _joinPath(listing.path, dir));
+                              }),
+                            ),
+                        ]);
+                      },
+                    ),
+                  ),
+                ] else
+                  const Spacer(),
+                ExpansionTile(
+                  key: const ValueKey('new-conversation-advanced-options'),
+                  tilePadding: EdgeInsets.zero,
+                  title: const Text('更多选项'),
+                  children: [
+                    RadioListTile<bool>(
+                      key: const ValueKey('new-conversation-mode-chat'),
+                      value: true,
+                      groupValue: useChat,
+                      onChanged: (value) => updateSheet(() => useChat = value!),
+                      title: const Text('文字聊天'),
+                      dense: true,
+                    ),
+                    RadioListTile<bool>(
+                      key: const ValueKey('new-conversation-mode-terminal'),
+                      value: false,
+                      groupValue: useChat,
+                      onChanged: (value) => updateSheet(() => useChat = value!),
+                      title: const Text('终端'),
+                      dense: true,
+                    ),
+                  ],
                 ),
                 CheckboxListTile(
                   key: const ValueKey('favorite-new-conversation'),
@@ -1415,7 +1584,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                             Navigator.pop(sheetContext,
                                 (path: checked.path, favorite: favorite));
                           },
-                    child: const Text('创建'),
+                    child: Text(useChat ? '进入聊天' : '打开终端'),
                   ),
                 ]),
               ]),
@@ -1425,11 +1594,18 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       ),
     );
     if (!mounted || selected == null) return;
+    if (!_favoriteDirectories.contains(selected.path)) {
+      _toggleFavoriteDirectory(selected.path);
+    }
     setState(() => _selectedConversationId = null);
-    _submit(newWorkDir: selected.path, favoriteOnCreate: selected.favorite);
+    _submit(
+        newWorkDir: selected.path,
+        favoriteOnCreate: selected.favorite,
+        openAsChat: useChat);
   }
 
   bool _canCheckRunningChat(CodexConversation conversation) =>
+      _openChatSessions.contains(conversation.id) ||
       widget.findRunningChatJob != null &&
       (conversation.state == CodexConversationState.running ||
           conversation.state == CodexConversationState.pending) &&
@@ -1437,6 +1613,11 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       (!_runningChatJobsKnown || _runningChatJobs.containsKey(conversation.id));
 
   Future<void> _attachRunningChat(CodexConversation conversation) async {
+    if (_openChatSessions.contains(conversation.id) &&
+        !_runningChatJobs.containsKey(conversation.id)) {
+      _submit(openAsChat: true);
+      return;
+    }
     final findJob = widget.findRunningChatJob;
     if (findJob == null || _attachingRunningChat) return;
     setState(() => _attachingRunningChat = true);
@@ -1496,13 +1677,8 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     return switch (_timeFilter) {
       _CodexTimeFilter.all => true,
       _CodexTimeFilter.today => date == today,
-      _CodexTimeFilter.yesterday =>
-        date == today.subtract(const Duration(days: 1)),
       _CodexTimeFilter.lastSevenDays =>
         !date.isBefore(today.subtract(const Duration(days: 6))) &&
-            date.isBefore(today.add(const Duration(days: 1))),
-      _CodexTimeFilter.lastThirtyDays =>
-        !date.isBefore(today.subtract(const Duration(days: 29))) &&
             date.isBefore(today.add(const Duration(days: 1))),
     };
   }
@@ -1518,12 +1694,45 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     };
   }
 
+  Future<void> _showConversationFavoriteMenu(CodexConversation conversation) async {
+    final favorite = _favoriteConversations.contains(conversation.id);
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              title: Text(conversation.displayTitle,
+                  maxLines: 2, overflow: TextOverflow.ellipsis),
+            ),
+            ListTile(
+              key: ValueKey('favorite-conversation-menu-${conversation.id}'),
+              leading: Icon(favorite ? Icons.star : Icons.star_border,
+                  color: AppTheme.orange),
+              title: Text(favorite ? '取消收藏' : '收藏对话'),
+              onTap: () {
+                _toggleFavoriteConversation(conversation.id);
+                Navigator.pop(sheetContext);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildConversationTile(CodexConversation conversation) {
     final selected = conversation.id == _selectedConversationId;
-    final stateColor = _stateColor(conversation.state);
+    final closed = !widget.isClaude && conversation.remoteOpen == false;
+    final stateColor = closed ? AppTheme.textMuted : _stateColor(conversation.state);
+    final showExternalProgress = conversation.state == CodexConversationState.running &&
+        !closed && _openedSessionsKnown && _runningChatJobsKnown &&
+        !_isAppConversation(conversation);
     BuildContext? viewButtonContext;
     var openViewerOnTap = false;
     return InkWell(
+      onLongPress: () => unawaited(_showConversationFavoriteMenu(conversation)),
       onTapDown: (details) {
         final box = viewButtonContext?.findRenderObject() as RenderBox?;
         openViewerOnTap = box != null &&
@@ -1554,7 +1763,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
               selected ? Icons.radio_button_checked : Icons.chat_bubble,
               key: ValueKey('conversation-leading-${conversation.id}'),
               size: 16,
-              color: selected ? AppTheme.blue : stateColor,
+              color: selected ? AppTheme.blue : closed ? AppTheme.textMuted : stateColor,
             ),
             const SizedBox(width: 8),
             Expanded(
@@ -1579,29 +1788,44 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
-                            color: AppTheme.textPrimary,
+                            color: closed ? AppTheme.textMuted : AppTheme.textPrimary,
                             fontSize: 12,
                           ),
                         ),
                       ),
                       const SizedBox(width: 4),
-                      Container(
-                        key: ValueKey('conversation-state-${conversation.id}'),
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 5,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: stateColor.withValues(alpha: 0.14),
-                          borderRadius: BorderRadius.circular(4),
-                          border: Border.all(
-                            color: stateColor.withValues(alpha: 0.45),
+                      Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Container(
+                            key: ValueKey('conversation-state-${conversation.id}'),
+                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: stateColor.withValues(alpha: 0.14),
+                              borderRadius: BorderRadius.circular(4),
+                              border: Border.all(color: stateColor.withValues(alpha: 0.45)),
+                            ),
+                            child: Text(
+                              _conversationStateLabel(conversation),
+                              style: TextStyle(color: stateColor, fontSize: 10),
+                            ),
                           ),
-                        ),
-                        child: Text(
-                          _conversationStateLabel(conversation),
-                          style: TextStyle(color: stateColor, fontSize: 10),
-                        ),
+                          if (showExternalProgress) ...[
+                            const SizedBox(height: 3),
+                            SizedBox(
+                              width: 36,
+                              height: 3,
+                              child: LinearProgressIndicator(
+                                key: ValueKey('conversation-progress-${conversation.id}'),
+                                minHeight: 3,
+                                borderRadius: BorderRadius.circular(2),
+                                backgroundColor: stateColor.withValues(alpha: 0.15),
+                                color: stateColor,
+                                semanticsLabel: '其他端执行中',
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
                       const SizedBox(width: 8),
                       Builder(builder: (context) {
@@ -1662,7 +1886,22 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                         ),
                       ),
                     ),
-                    if (_isOpenedConversation(conversation) ||
+                    if (!widget.isClaude) ...[
+                      const SizedBox(width: 4),
+                      Text(
+                        switch (conversation.remoteOpen) {
+                          true => '远程已打开',
+                          false => '远程已关闭',
+                          null => '打开状态未知',
+                        },
+                        key: ValueKey('conversation-open-${conversation.id}'),
+                        style: TextStyle(
+                          color: conversation.remoteOpen == true
+                              ? AppTheme.cyan : AppTheme.textMuted,
+                          fontSize: 10,
+                        ),
+                      ),
+                    ] else if (_isOpenedConversation(conversation) ||
                         _localOpenedConversationIds
                             .contains(conversation.id)) ...[
                       const SizedBox(width: 4),
@@ -1673,18 +1912,19 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                       const SizedBox(width: 4),
                       Text('本软件聊天',
                           style: TextStyle(color: AppTheme.cyan, fontSize: 10)),
-                    ] else if (!widget.isClaude && !conversation.canResume) ...[
-                      const SizedBox(width: 4),
-                      Text(
-                          conversation.state == CodexConversationState.running
-                              ? '等待远端完成'
-                              : conversation.canTakeover
-                                  ? '需接管'
-                                  : '不可恢复',
-                          style:
-                              TextStyle(color: AppTheme.orange, fontSize: 10)),
                     ],
                   ]),
+                  if (!widget.isClaude && !conversation.canResume &&
+                      conversation.state != CodexConversationState.notStarted &&
+                      !_isOpenedConversation(conversation) &&
+                      !_runningChatJobs.containsKey(conversation.id) &&
+                      !_openChatSessions.contains(conversation.id))
+                    Text(
+                      conversation.state == CodexConversationState.running
+                          ? '等待远端完成'
+                          : conversation.canTakeover ? '需接管' : '不可恢复',
+                      style: TextStyle(color: AppTheme.orange, fontSize: 10),
+                    ),
                   if (!widget.isClaude) ValueListenableBuilder<int>(
                     valueListenable: NotificationService.historyRevision,
                     builder: (context, _, __) {
@@ -1732,10 +1972,12 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
 
   Widget _buildConversationList({bool favoritesOnly = false}) {
     final runningView = _runningOnly && !favoritesOnly;
+    final remoteOpenView = _remoteOpenOnly && !favoritesOnly;
     final source = _conversationSource(favoritesOnly);
-    final loading = runningView && widget.loadRunningConversations != null
+    final loading = remoteOpenView && widget.loadRemoteOpenConversations != null
+        ? _loadingRemoteOpen : runningView && widget.loadRunningConversations != null
         ? _loadingRunning : _loadingConversations;
-    final error = runningView ? _runningError : _conversationError;
+    final error = remoteOpenView ? _remoteOpenError : runningView ? _runningError : _conversationError;
     if (loading && source.isEmpty) {
       return Center(
         child: Column(
@@ -1744,7 +1986,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
             CircularProgressIndicator(color: AppTheme.blue),
             SizedBox(height: 12),
             Text(
-              '正在读取远程 Codex 对话…',
+              '正在读取远程 ${widget.isClaude ? 'Claude' : 'Codex'} 对话…',
               style: TextStyle(color: AppTheme.textMuted, fontSize: 12),
             ),
           ],
@@ -1765,7 +2007,8 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     if (source.isEmpty) {
       return Center(
         child: Text(
-          runningView ? '当前没有正在执行或24小时内完成的对话' :
+          remoteOpenView ? '当前没有远程打开的对话' :
+          runningView ? (widget.isClaude ? '当前没有正在执行或24小时内完成的对话' : '没有未读的新回复') :
           _showAllConversations ? '远端没有找到 ${widget.isClaude ? 'Claude' : 'Codex'} 对话记录' : '当前目录没有找到 ${widget.isClaude ? 'Claude' : 'Codex'} 对话',
           style: TextStyle(color: AppTheme.textMuted, fontSize: 12),
           textAlign: TextAlign.center,
@@ -1777,8 +2020,8 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     if (filtered.isEmpty) {
       return Center(
         child: Text(
-          runningView
-              ? '当前筛选条件下没有正在执行或24小时内完成的对话'
+          remoteOpenView ? '当前筛选条件下没有远程打开的对话' : runningView
+              ? (widget.isClaude ? '当前筛选条件下没有正在执行或24小时内完成的对话' : '当前筛选条件下没有新回复')
               : favoritesOnly && _favoriteConversations.isEmpty
               ? '还没有收藏的对话'
               : _filteredDirectories.isNotEmpty
@@ -1798,7 +2041,8 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
         if (entry.key.isNotEmpty) entry.key: entry.value.length,
     };
     final children = _buildConversationDirectoryNodes(
-        _directoryTree(counts), byDirectory, filtered);
+        _directoryTree(counts), byDirectory, filtered,
+        prioritizeFavoriteDirectories: remoteOpenView);
     final withoutDirectory = byDirectory[''] ?? const <CodexConversation>[];
     if (withoutDirectory.isNotEmpty) {
       final collapsed = _collapsedConversationDirectoryPaths.contains('');
@@ -1838,7 +2082,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       List<_CodexDirectoryNode> nodes,
       Map<String, List<CodexConversation>> byDirectory,
       List<CodexConversation> filtered,
-      {int depth = 0}) {
+      {int depth = 0, bool prioritizeFavoriteDirectories = false}) {
     List<CodexConversation> descendants(String path) => filtered
         .where((conversation) => _isDirectoryOrChild(conversation.cwd, path))
         .toList();
@@ -1847,7 +2091,10 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       final aItems = descendants(a.path);
       final bItems = descendants(b.path);
       int priority(_CodexDirectoryNode node, List<CodexConversation> items) =>
-          (_favoriteDirectories.contains(node.path) ? 2 : 0) +
+          ((_favoriteDirectories.contains(node.path) ||
+                  (prioritizeFavoriteDirectories && items.any((item) =>
+                      _favoriteDirectories.any((path) =>
+                          _isDirectoryOrChild(item.cwd, path))))) ? 2 : 0) +
           (items.any((item) => _favoriteConversations.contains(item.id))
               ? 1
               : 0);
@@ -1907,7 +2154,8 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       }
       rows.addAll(_buildConversationDirectoryNodes(
           node.children.values.toList(), byDirectory, filtered,
-          depth: depth + 1));
+          depth: depth + 1,
+          prioritizeFavoriteDirectories: prioritizeFavoriteDirectories));
     }
     return rows;
   }
@@ -2120,7 +2368,11 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
 
   void _selectConversation(CodexConversation conversation) {
     setState(() => _selectedConversationId = conversation.id);
-    unawaited(_preloadConversation(conversation.id));
+    if (_remoteOpenOnly && _openChatSessions.contains(conversation.id)) {
+      unawaited(_attachRunningChat(conversation));
+    } else {
+      unawaited(_preloadConversation(conversation.id));
+    }
   }
 
   Future<void> _preloadConversation(String conversationId) async {
@@ -2133,6 +2385,10 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
 
   Future<void> _openConversationViewer(CodexConversation conversation) async {
     setState(() => _selectedConversationId = conversation.id);
+    if (_openChatSessions.contains(conversation.id)) {
+      await _attachRunningChat(conversation);
+      return;
+    }
     await showDialog<void>(
       context: context,
       builder: (_) => CodexConversationViewerDialog(
@@ -2291,7 +2547,8 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
               ),
             ],
           ),
-          if (!widget.isClaude && !canTakeover && !canCheckRunningChat)
+          if (!widget.isClaude && !conversation.canResume &&
+              !canTakeover && !canCheckRunningChat)
             Padding(
               padding: EdgeInsets.only(left: 6, bottom: 3),
               child: Text(
@@ -2443,113 +2700,18 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     }
   }
 
-  Widget _buildOpenedConversationsSection() {
-    final activeChats = _conversations
-        .where((conversation) =>
-            (_runningChatJobs.containsKey(conversation.id) ||
-                _localOpenedConversationIds.contains(conversation.id)) &&
-            !_isOpenedConversation(conversation))
-        .toList();
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: const EdgeInsets.only(top: 6, bottom: 4),
-          child: Text('当前打开 · ${_openedSessions.length + activeChats.length} 条',
-              style: TextStyle(
-                  color: AppTheme.textSecondary,
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600)),
-        ),
-        ConstrainedBox(
-          constraints: const BoxConstraints(maxHeight: 190),
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              ...activeChats.map((conversation) => ListTile(
-                    key: ValueKey('opened-chat-${conversation.id}'),
-                    dense: true,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-                    leading: Icon(Icons.chat_bubble_outline,
-                        size: 18, color: AppTheme.cyan),
-                    title: Text(conversation.displayTitle,
-                        maxLines: 1, overflow: TextOverflow.ellipsis),
-                    subtitle: Text(_runningChatJobs.containsKey(conversation.id)
-                        ? '本软件执行中'
-                        : '本机文字聊天'),
-                    trailing: _localOpenedConversationIds
-                                .contains(conversation.id) &&
-                            !_runningChatJobs.containsKey(conversation.id)
-                        ? IconButton(
-                            key: ValueKey('close-opened-chat-${conversation.id}'),
-                            tooltip: '从当前打开移除',
-                            icon: const Icon(Icons.close, size: 18),
-                            onPressed: () {
-                              setState(() => _localOpenedConversationIds
-                                  .remove(conversation.id));
-                              unawaited(StorageService
-                                  .setOpenedCodexConversations(
-                                      widget.connectionId,
-                                      _localOpenedConversationIds));
-                            },
-                          )
-                        : const Icon(Icons.chevron_right, size: 18),
-                    onTap: () => _selectConversation(conversation),
-                  )),
-              ..._openedSessions.map((session) {
-              final conversation = CodexSessionService.matchOpenedConversation(
-                  session, _conversations);
-              return ListTile(
-                key: ValueKey('opened-session-${session.name}'),
-                dense: true,
-                contentPadding: const EdgeInsets.symmetric(horizontal: 4),
-                leading: Icon(Icons.tab, size: 18, color: AppTheme.cyan),
-                title: Text(_openedSessionTitle(session),
-                    maxLines: 1, overflow: TextOverflow.ellipsis),
-                subtitle: Text(session.workDir,
-                    maxLines: 1, overflow: TextOverflow.ellipsis),
-                trailing: conversation == null
-                    ? Text(_openAsChat ? '识别中' : '终端',
-                        style: TextStyle(color: AppTheme.textMuted))
-                    : const Icon(Icons.chevron_right, size: 18),
-                onTap: () {
-                  if (conversation != null) {
-                    _selectConversation(conversation);
-                    return;
-                  }
-                  Navigator.pop(
-                      context,
-                      CodexSessionConfig(
-                        name: session.name,
-                        workDir: session.workDir,
-                        openSessionName: session.name,
-                        openAsChat: _openAsChat,
-                        openedSessionTitles: {
-                          for (final opened in _openedSessions)
-                            opened.name: _openedSessionTitle(opened),
-                        },
-                      ));
-                },
-              );
-              }),
-            ],
-          ),
-        ),
-        const Divider(height: 12),
-      ],
-    );
-  }
-
   Widget _buildConversationPane({bool favoritesOnly = false}) {
+    final allDirectories = !favoritesOnly &&
+        (_remoteOpenOnly || (_runningOnly && !widget.isClaude));
     final source = _conversationSource(favoritesOnly);
-    final loading = _runningOnly && !favoritesOnly &&
+    final loading = _remoteOpenOnly && !favoritesOnly &&
+            widget.loadRemoteOpenConversations != null
+        ? _loadingRemoteOpen : _runningOnly && !favoritesOnly &&
             widget.loadRunningConversations != null
         ? _loadingRunning : _loadingConversations;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (favoritesOnly && _usesMobileLayout(context))
-          _buildOpenedConversationsSection(),
         Row(
           children: [
             Expanded(
@@ -2580,17 +2742,17 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                   ),
                   if (!favoritesOnly) ...[
                     const SizedBox(width: 4),
-                    for (final running in [false, true])
+                    for (final filter in (widget.isClaude ? [0, 1] : [2, 1, 0]))
                       TextButton(
-                        key: ValueKey(running
-                            ? 'conversation-filter-running'
-                            : 'conversation-filter-all'),
-                        onPressed: () => _setRunningOnly(running),
+                        key: ValueKey(['conversation-filter-all',
+                            'conversation-filter-running', 'conversation-filter-open'][filter]),
+                        onPressed: () => _setRunningOnly(filter == 1,
+                            remoteOpenOnly: filter == 2),
                         style: TextButton.styleFrom(
-                          foregroundColor: _runningOnly == running
+                          foregroundColor: (_remoteOpenOnly ? 2 : _runningOnly ? 1 : 0) == filter
                               ? AppTheme.blue
                               : AppTheme.textMuted,
-                          backgroundColor: _runningOnly == running
+                          backgroundColor: (_remoteOpenOnly ? 2 : _runningOnly ? 1 : 0) == filter
                               ? AppTheme.blue.withValues(alpha: 0.12)
                               : Colors.transparent,
                           padding: const EdgeInsets.symmetric(horizontal: 6),
@@ -2598,7 +2760,9 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           textStyle: const TextStyle(fontSize: 11),
                         ),
-                        child: Text(running ? '正在执行' : '全部'),
+                        child: Text((widget.isClaude
+                            ? ['全部', '正在执行', '远程打开']
+                            : ['历史', '新回复', '远程打开'])[filter]),
                       ),
                   ],
                 ],
@@ -2610,7 +2774,9 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
               initialValue: _timeFilter,
               onSelected: (value) => setState(() => _timeFilter = value),
               itemBuilder: (context) => [
-                for (final filter in _CodexTimeFilter.values)
+                for (final filter in [
+                  _CodexTimeFilter.today, _CodexTimeFilter.lastSevenDays,
+                ])
                   PopupMenuItem(
                     value: filter,
                     child: Row(
@@ -2627,30 +2793,41 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                     ),
                   ),
               ],
-              child: Row(
+              child: _usesMobileLayout(context) && !widget.isClaude
+                  ? SizedBox(
+                      width: 28,
+                      height: 28,
+                      child: Icon(Icons.schedule, size: 15,
+                          color: _timeFilter == _CodexTimeFilter.all
+                              ? AppTheme.textMuted : AppTheme.blue),
+                    )
+                  : Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   const Icon(Icons.schedule, size: 15),
                   const SizedBox(width: 3),
-                  Text(_timeFilter.label),
+                  Text(_timeFilter == _CodexTimeFilter.all
+                      ? '时间筛选' : _timeFilter.label),
                   const Icon(Icons.arrow_drop_down, size: 16),
                 ],
               ),
             ),
             IconButton(
               key: const ValueKey('conversation-directory-filter'),
-              tooltip: _filteredDirectories.isEmpty
+              tooltip: allDirectories
+                  ? (_remoteOpenOnly ? '显示所有远程打开的目录，收藏目录优先' : '显示所有目录的新回复')
+                  : _filteredDirectories.isEmpty
                   ? '按目录筛选对话'
                   : '已筛选 ${_filteredDirectories.length} 个目录',
-              onPressed: _showConversationDirectoryFilter,
-              icon: _filteredDirectories.isEmpty
+              onPressed: allDirectories ? null : _showConversationDirectoryFilter,
+              icon: allDirectories || _filteredDirectories.isEmpty
                   ? const Icon(Icons.folder_outlined, size: 18)
                   : Badge.count(
                       count: _filteredDirectories.length,
                       backgroundColor: AppTheme.blue,
                       child: const Icon(Icons.folder_outlined, size: 18),
                     ),
-              color: _filteredDirectories.isEmpty
+              color: allDirectories || _filteredDirectories.isEmpty
                   ? AppTheme.textSecondary
                   : AppTheme.blue,
               visualDensity: VisualDensity.compact,
@@ -2669,7 +2846,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
           ),
         ),
         Expanded(child: _buildConversationList(favoritesOnly: favoritesOnly)),
-        if (_showAllConversations &&
+        if (!(_remoteOpenOnly && !favoritesOnly) && _showAllConversations &&
             _hasOlderConversations &&
             widget.loadMoreConversations != null)
           TextButton(
@@ -2717,7 +2894,9 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                 ? '正在接入…'
                 : canCheckRunningChat
                     ? '接入对话'
-                    : '继续对话'),
+                    : !widget.isClaude && conversation.remoteOpen == false
+                        ? '重新激活对话'
+                        : '继续对话'),
           ),
         ),
         const SizedBox(width: 8),
@@ -2886,7 +3065,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
             ],
           ),
         ),
-        bottomNavigationBar: SafeArea(
+        bottomNavigationBar: _remoteOpenOnly && _mobileSection == 0 ? null : SafeArea(
           minimum: const EdgeInsets.fromLTRB(16, 8, 16, 8),
           child: _buildMobileSelectionBar(),
         ),
@@ -2955,6 +3134,8 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                   isResuming
                       ? (_canCheckRunningChat(_selectedConversation!)
                           ? '接入聊天'
+                          : !widget.isClaude && _selectedConversation!.remoteOpen == false
+                              ? '重新激活对话'
                           : _openAsChat
                               ? '打开聊天'
                               : '恢复')
@@ -2999,6 +3180,7 @@ class _CodexConversationViewerDialogState
     extends State<CodexConversationViewerDialog> {
   List<CodexConversationRecord> _records = const [];
   Timer? _refreshTimer;
+  Duration? _refreshInterval;
   CodexConversationState? _observedState;
   bool _requestInFlight = false;
   late String _logLevel;
@@ -3065,7 +3247,7 @@ class _CodexConversationViewerDialogState
         style: TextStyle(color: AppTheme.orange, fontSize: 12)),
       if (_sendError != null) Text(_sendError!, style: TextStyle(color: AppTheme.red, fontSize: 12)),
       Row(children: [
-        Expanded(child: Text(switch (session?.status) {
+        Expanded(child: Text(switch (active ? session?.status : null) {
           'starting' => 'Claude 正在启动，请在终端完成首次确认',
           'busy' => 'Claude 正在执行 · 新消息会排队',
           'awaiting_input' => 'Claude 等待确认 · 请打开终端处理',
@@ -3108,10 +3290,18 @@ class _CodexConversationViewerDialogState
     }
   }
 
-  void _startRefreshing() {
-    if (_refreshTimer?.isActive == true) return;
-    _refreshTimer = Timer.periodic(const Duration(seconds: 2),
-        (_) => unawaited(_loadRecords(quiet: true)));
+  void _startRefreshing({Duration? interval}) {
+    final nextInterval = interval ?? Duration(seconds: widget.isClaude ? 2 : 1);
+    if (_refreshTimer?.isActive == true && _refreshInterval == nextInterval) return;
+    _refreshTimer?.cancel();
+    _refreshInterval = nextInterval;
+    _refreshTimer = Timer.periodic(nextInterval, (_) {
+      final lifecycle = WidgetsBinding.instance.lifecycleState;
+      if ((lifecycle == null || lifecycle == AppLifecycleState.resumed) &&
+          ModalRoute.of(context)?.isCurrent != false) {
+        unawaited(_loadRecords(quiet: true));
+      }
+    });
   }
 
   Future<void> _sendRemoteMessage() async {
@@ -3159,6 +3349,8 @@ class _CodexConversationViewerDialogState
         widget.conversation.state == CodexConversationState.running ||
         widget.conversation.state == CodexConversationState.pending) {
       _startRefreshing();
+    } else if (widget.conversation.remoteOpen == true) {
+      _startRefreshing(interval: const Duration(seconds: 5));
     }
     unawaited(_loadRecords());
   }
@@ -3186,20 +3378,32 @@ class _CodexConversationViewerDialogState
       final records = await widget.loadRecords(widget.conversation.id);
       if (!mounted) return;
       final lastKind = records.isEmpty ? null : records.last.kind;
+      final latestTask = records.reversed.where((record) =>
+          record.kind == 'task_started' || record.kind == 'task_complete' ||
+          record.kind == 'turn_aborted').firstOrNull?.kind;
       _pendingMessages.reconcile(records);
-      if (!widget.isClaude && !_pendingMessages.isNotEmpty &&
-          (lastKind == 'task_complete' || lastKind == 'turn_aborted')) {
-        _refreshTimer?.cancel();
+      if (!widget.isClaude) {
+        if (!_pendingMessages.isNotEmpty &&
+            (latestTask == 'task_complete' || latestTask == 'turn_aborted')) {
+          if (widget.conversation.remoteOpen == true) {
+            _startRefreshing(interval: const Duration(seconds: 5));
+          } else {
+            _refreshTimer?.cancel();
+          }
+        } else if (latestTask == 'task_started' || _pendingMessages.isNotEmpty) {
+          _startRefreshing();
+        }
       }
       setState(() {
         _records = records;
         _loading = false;
         _error = null;
-        if (lastKind == 'task_complete') {
+        if ((widget.isClaude ? lastKind : latestTask) == 'task_complete') {
           _observedState = CodexConversationState.complete;
-        } else if (lastKind == 'turn_aborted') {
+        } else if ((widget.isClaude ? lastKind : latestTask) == 'turn_aborted') {
           _observedState = CodexConversationState.aborted;
-        } else if (!widget.isClaude && _refreshTimer?.isActive == true && records.isNotEmpty) {
+        } else if (!widget.isClaude &&
+            (latestTask == 'task_started' || _pendingMessages.isNotEmpty)) {
           _observedState = CodexConversationState.running;
         }
       });
@@ -3370,10 +3574,29 @@ class _CodexConversationViewerDialogState
     };
   }
 
+  String get _viewerStateLabel {
+    if (_pendingMessages.isNotEmpty) return '等待远程处理';
+    final state = _observedState ?? widget.conversation.state;
+    if (!widget.isClaude) return state.label;
+    final session = _claudeStatus?.session;
+    if (session?.isAlive == true) {
+      switch (session!.status) {
+        case 'busy': return '正在执行';
+        case 'starting': return '正在启动';
+        case 'awaiting_input': return '等待确认';
+        case 'ready': return '等待消息';
+      }
+    }
+    return state == CodexConversationState.unknown ? '状态未知' : state.label;
+  }
+
   Widget _buildTerminalStatus() {
     final state = widget.isClaude && _claudeStatus?.session?.status == 'busy'
         ? CodexConversationState.running : _observedState ?? widget.conversation.state;
-    if (_logLevel != 'terminal' || state != CodexConversationState.running) {
+    final running = widget.isClaude
+        ? _claudeStatus?.session?.isAlive == true && _claudeStatus?.session?.status == 'busy'
+        : state == CodexConversationState.running;
+    if (_logLevel != 'terminal' || !running) {
       return const SizedBox.shrink();
     }
     String heading = widget.isClaude ? 'Claude 正在执行' : 'Working';
@@ -3414,7 +3637,7 @@ class _CodexConversationViewerDialogState
           children: [
             Expanded(
               child: Text(
-                '${_pendingMessages.isNotEmpty ? '等待远程处理' : (_observedState ?? widget.conversation.state).label}  ·  ${widget.conversation.id}',
+                '$_viewerStateLabel  ·  ${widget.conversation.id}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(
@@ -3954,12 +4177,22 @@ class _CodexConversationPickerScreenState
     }
 
     try {
-      final connecting = widget.connect?.call() ??
-          SshService.connectClient(widget.connection).then((_) {});
-      // 对话框下一帧构建；提前捕获快速失败，错误仍由各读取入口显示。
-      connecting.ignore();
+      Future<void>? connecting;
+      Future<void> ensureConnected() {
+        final pending = connecting;
+        if (pending != null) return pending;
+        late final Future<void> request;
+        request = Future<void>.sync(() => widget.connect?.call() ??
+            SshService.connectClient(widget.connection).then((_) {}))
+            .whenComplete(() {
+          if (identical(connecting, request)) connecting = null;
+        });
+        connecting = request;
+        return request;
+      }
+
       Future<T> afterConnect<T>(Future<T> Function() load) async {
-        await connecting;
+        await ensureConnected();
         return load();
       }
 
@@ -3976,6 +4209,8 @@ class _CodexConversationPickerScreenState
                   widget.connection.id, workDir)),
           loadAllConversations: () => afterConnect(
               () => CodexSessionService.listAll(widget.connection.id)),
+          loadRemoteOpenConversations: () => afterConnect(
+              () => CodexSessionService.listRemoteOpen(widget.connection.id)),
           loadRunningConversations: () => afterConnect(
               () => CodexSessionService.listRunning(widget.connection.id)),
           loadMoreConversations: (offset) => afterConnect(
@@ -3988,6 +4223,8 @@ class _CodexConversationPickerScreenState
               () => RemoteDirectoryService.list(widget.connection.id, path)),
           loadOpenedSessions: () => afterConnect(
               () => CodexSessionService.listOpened(widget.connection.id)),
+          loadOpenChatSessions: () => afterConnect(
+              () => CodexChatService.listOpenSessions(widget.connection.id)),
           loadRunningChatJobs: () => afterConnect(
               () => CodexChatService.listActiveJobs(widget.connection.id)),
           findRunningChatJob: (conversationId) => afterConnect(
@@ -4001,7 +4238,7 @@ class _CodexConversationPickerScreenState
         Navigator.of(context).pop();
         return;
       }
-      await connecting;
+      await ensureConnected();
       if (!mounted) return;
       if (config.openAsChat &&
           config.stopWriterBeforeLaunch &&
@@ -5720,6 +5957,8 @@ class _TmuxWorkspaceScreenState extends State<TmuxWorkspaceScreen> {
           dialogTitle: codexDialogTitle ?? '新建 Codex 会话',
           loadConversations: (workDir) =>
               CodexSessionService.listForDirectory(_connectionId, workDir),
+          loadRemoteOpenConversations: () =>
+              CodexSessionService.listRemoteOpen(_connectionId),
           loadRunningConversations: () =>
               CodexSessionService.listRunning(_connectionId),
           loadAllConversations: showAllCodexConversations
@@ -5742,6 +5981,8 @@ class _TmuxWorkspaceScreenState extends State<TmuxWorkspaceScreen> {
           loadDirectories: _listRemoteDirectories,
           loadOpenedSessions: () =>
               CodexSessionService.listOpened(_connectionId),
+          loadOpenChatSessions: () =>
+              CodexChatService.listOpenSessions(_connectionId),
           loadRunningChatJobs: () =>
               CodexChatService.listActiveJobs(_connectionId),
           findRunningChatJob: (conversationId) =>

@@ -41,6 +41,13 @@ class CodexReasoningEffort {
   const CodexReasoningEffort(this.id, this.description);
 }
 
+class CodexRemoteSessionStatus {
+  final bool open;
+  final bool busy;
+
+  const CodexRemoteSessionStatus({required this.open, required this.busy});
+}
+
 class CodexChatService {
   static const defaultModel = 'gpt-6-sol';
   static final Set<String> _installedWorkers = {};
@@ -61,6 +68,16 @@ class CodexChatService {
   }
 
   static String _quote(String value) => "'${value.replaceAll("'", "'\"'\"'")}'";
+
+  static CodexRemoteSessionStatus parseRemoteSessionStatus(
+          Map<String, dynamic> response) =>
+      CodexRemoteSessionStatus(
+        open: response['open'] == true,
+        busy: response['busy'] == true,
+      );
+
+  static Set<String> parseOpenSessions(Map<String, dynamic> response) =>
+      (response['threadIds'] as List? ?? const []).whereType<String>().toSet();
 
   static List<CodexModel> parseModels(String output) {
     final data = jsonDecode(output) as List;
@@ -233,6 +250,36 @@ finally:
       'find ${_quote(threadId)}; else printf "{}"; fi',
     );
     return response['jobId'] as String?;
+  }
+
+  static Future<CodexRemoteSessionStatus> getRemoteSession(
+      String connectionId, String threadId) async {
+    final response = await _remoteJson(
+      connectionId,
+      'if [ -f "\$HOME/.ssh_tool/codex_chat_worker.py" ]; then '
+      'python3 "\$HOME/.ssh_tool/codex_chat_worker.py" '
+      'session ${_quote(threadId)}; else printf %s \'{"open":false,"busy":false}\'; fi',
+    );
+    return parseRemoteSessionStatus(response);
+  }
+
+  static Future<Set<String>> listOpenSessions(String connectionId) async {
+    final response = await _remoteJson(
+      connectionId,
+      'if [ -f "\$HOME/.ssh_tool/codex_chat_worker.py" ]; then '
+      'python3 "\$HOME/.ssh_tool/codex_chat_worker.py" sessions; '
+      'else printf %s \'{"threadIds":[]}\'; fi',
+    );
+    return parseOpenSessions(response);
+  }
+
+  static Future<void> closeRemoteSession(
+      String connectionId, String threadId) async {
+    await _remoteJson(
+      connectionId,
+      'python3 "\$HOME/.ssh_tool/codex_chat_worker.py" '
+      'close ${_quote(threadId)}',
+    );
   }
 
   static const _listActiveJobsScript = r'''import json

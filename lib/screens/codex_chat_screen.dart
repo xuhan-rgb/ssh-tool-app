@@ -28,6 +28,9 @@ class CodexChatScreen extends StatefulWidget {
   final Future<CodexChatResult> Function(String prompt)? sendMessage;
   final Future<void> Function(String threadId)? onConversationCreated;
   final Future<CodexChatResult> Function(String jobId)? watchRunningJob;
+  final Future<CodexRemoteSessionStatus> Function(String threadId)?
+      getRemoteSession;
+  final Future<void> Function(String threadId)? closeRemoteSession;
 
   const CodexChatScreen({
     super.key,
@@ -40,6 +43,8 @@ class CodexChatScreen extends StatefulWidget {
     this.sendMessage,
     this.onConversationCreated,
     this.watchRunningJob,
+    this.getRemoteSession,
+    this.closeRemoteSession,
   });
 
   @override
@@ -57,6 +62,10 @@ class _CodexChatScreenState extends State<CodexChatScreen>
   String? _error;
   bool _loading = false;
   bool _sending = false;
+  bool _remoteSessionOpen = false;
+  bool _remoteSessionClosedByUser = false;
+  bool _closingRemoteSession = false;
+  int _remoteSessionRequest = 0;
   bool _forkPending = false;
   bool _contextCleared = false;
   bool _clearPending = false;
@@ -109,6 +118,13 @@ class _CodexChatScreenState extends State<CodexChatScreen>
   }
 
   String get _workDir => widget.conversation?.cwd ?? widget.workDir;
+
+  String get _remoteSessionLabel {
+    if (_closingRemoteSession) return '正在关闭远程会话…';
+    if (_remoteSessionOpen) return '等待消息·远程已打开';
+    if (_remoteSessionClosedByUser) return '等待消息·远程已关闭';
+    return '等待消息·远程状态待确认';
+  }
 
   String _compactWorkDir(BuildContext context, double width, TextStyle style) {
     final path = _workDir;
@@ -189,6 +205,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
       } else {
         unawaited(_loadHistory().then((_) => _recoverRunningTurn()));
       }
+      if (!_forkPending) unawaited(_refreshRemoteSession());
     }
     unawaited(_loadModels());
   }
@@ -211,6 +228,67 @@ class _CodexChatScreenState extends State<CodexChatScreen>
         0;
     if (inset > _keyboardInset && _inputFocus.hasFocus) _scrollToEnd();
     _keyboardInset = inset;
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_refreshRemoteSession());
+    }
+  }
+
+  Future<void> _refreshRemoteSession() async {
+    final threadId = _threadId;
+    if (threadId == null || _sending || _forkPending || _closingRemoteSession) {
+      return;
+    }
+    final request = ++_remoteSessionRequest;
+    try {
+      final status = await (widget.getRemoteSession?.call(threadId) ??
+          CodexChatService.getRemoteSession(widget.connection.id, threadId));
+      if (!mounted ||
+          _threadId != threadId ||
+          request != _remoteSessionRequest ||
+          _sending ||
+          _forkPending) {
+        return;
+      }
+      setState(() {
+        _remoteSessionOpen = status.open;
+        if (status.open) _remoteSessionClosedByUser = false;
+      });
+    } catch (_) {
+      // Older remote workers do not expose persistent session state.
+    }
+  }
+
+  Future<void> _closeRemoteSession() async {
+    final threadId = _threadId;
+    if (threadId == null || !_remoteSessionOpen || _sending || _forkPending || _closingRemoteSession) {
+      return;
+    }
+    _remoteSessionRequest++;
+    setState(() => _closingRemoteSession = true);
+    try {
+      await (widget.closeRemoteSession?.call(threadId) ??
+          CodexChatService.closeRemoteSession(widget.connection.id, threadId));
+      if (mounted) {
+        setState(() {
+          if (_threadId == threadId) {
+            _remoteSessionOpen = false;
+            _remoteSessionClosedByUser = true;
+          }
+          _closingRemoteSession = false;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _closingRemoteSession = false;
+          _error = '关闭远程会话失败：$error';
+        });
+      }
+    }
   }
 
   Future<void> _loadHistory() async {
@@ -420,6 +498,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
 
   Future<void> _watchRunningJob(String jobId) async {
     if (!mounted || _threadId == null) return;
+    _remoteSessionRequest++;
     if (!_sending) setState(() => _sending = true);
     _activity = '';
     _turnStartedAt = null;
@@ -449,6 +528,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
             DateTime.now().difference(_turnStartedAt!).inSeconds;
       });
       await _loadHistory();
+      unawaited(_refreshRemoteSession());
       _sendNextQueued();
     } catch (error) {
       _stopElapsedTimer();
@@ -466,7 +546,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
 
   Future<void> _send() async {
     final prompt = _input.text.trim();
-    if (prompt.isEmpty || _readOnlyReason != null) return;
+    if (prompt.isEmpty || _readOnlyReason != null || _closingRemoteSession) return;
     if (prompt == '/clear') {
       _input.clear();
       _requestClearContext();
@@ -484,6 +564,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
 
   Future<void> _sendPrompt(String prompt) async {
     final creatingConversation = _threadId == null;
+    _remoteSessionRequest++;
     setState(() {
       _sending = true;
       _streamedAnswer = '';
@@ -537,6 +618,8 @@ class _CodexChatScreenState extends State<CodexChatScreen>
           _scroll.position.extentAfter < 80;
       setState(() {
         _threadId = result.threadId;
+        _remoteSessionOpen = true;
+        _remoteSessionClosedByUser = false;
         _forkPending = false;
         _sending = false;
         _streamedAnswer = '';
@@ -619,6 +702,9 @@ class _CodexChatScreenState extends State<CodexChatScreen>
       _contextCleared = true;
       _clearPending = false;
       _threadId = null;
+      _remoteSessionOpen = false;
+      _remoteSessionClosedByUser = false;
+      _remoteSessionRequest++;
       _forkPending = false;
       _records = _archivedRecords;
       _loading = false;
@@ -912,6 +998,10 @@ class _CodexChatScreenState extends State<CodexChatScreen>
                   _requestClearContext();
                   return;
                 }
+                if (value == 'close-session') {
+                  unawaited(_closeRemoteSession());
+                  return;
+                }
                 setState(() {
                   if (value == 'time') _showMessageTime = !_showMessageTime;
                   if (value == 'tokens') _showTokenUsage = !_showTokenUsage;
@@ -940,6 +1030,11 @@ class _CodexChatScreenState extends State<CodexChatScreen>
                   value: 'clear',
                   enabled: !_clearPending,
                   child: const Text('清空上下文'),
+                ),
+                PopupMenuItem(
+                  value: 'close-session',
+                  enabled: _remoteSessionOpen && !_sending && !_forkPending && !_closingRemoteSession,
+                  child: const Text('关闭远程会话'),
                 ),
               ],
             ),
@@ -994,6 +1089,18 @@ class _CodexChatScreenState extends State<CodexChatScreen>
       ),
       body: Column(
         children: [
+          if (_threadId != null && !_sending && !_forkPending)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  _remoteSessionLabel,
+                  key: const ValueKey('chat-remote-session-status'),
+                  style: TextStyle(color: AppTheme.textMuted, fontSize: 12),
+                ),
+              ),
+            ),
           if (_threadId != null)
             CodexGoalCard(
               connectionId: widget.connection.id,
@@ -1038,7 +1145,12 @@ class _CodexChatScreenState extends State<CodexChatScreen>
                 ? const Center(child: CircularProgressIndicator())
                 : _records.isEmpty
                     ? Center(
-                        child: Text('发送消息，开始文字对话',
+                        child: Text(
+                            _threadId == null
+                                ? '尚未启动·发送首条消息后启动远程会话'
+                                : _forkPending
+                                    ? '发送首条消息后启动 Fork 远程会话'
+                                    : _remoteSessionLabel,
                             style: TextStyle(color: AppTheme.textMuted)),
                       )
                     : ListView.builder(
@@ -1227,7 +1339,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
                 const SizedBox(width: 8),
                 IconButton.filled(
                   key: const ValueKey('chat-send'),
-                  onPressed: _readOnlyReason != null ? null : _send,
+                  onPressed: _readOnlyReason != null || _closingRemoteSession ? null : _send,
                   icon: Icon(_sending ? Icons.queue : Icons.send),
                   tooltip: _sending ? '加入待发送队列' : '发送',
                 ),

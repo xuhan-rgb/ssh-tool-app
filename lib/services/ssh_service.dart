@@ -165,6 +165,19 @@ class SshService {
   }
 
   static Future<TerminalSession> _connectClientImpl(SshConnection config) async {
+    for (var attempt = 0; ; attempt++) {
+      try {
+        return await _connectClientAttempt(config);
+      } on SSHAuthAbortError {
+        if (attempt >= 2) {
+          throw Exception('认证中断: 连接被服务器关闭');
+        }
+        await Future<void>.delayed(Duration(milliseconds: 500 * (attempt + 1)));
+      }
+    }
+  }
+
+  static Future<TerminalSession> _connectClientAttempt(SshConnection config) async {
     final override = connectClientOverride;
     if (override != null) return override(config);
     final id = config.id;
@@ -180,6 +193,7 @@ class SshService {
       await disconnect(id);
     }
 
+    SSHClient? client;
     try {
       final session = TerminalSession(id);
 
@@ -189,7 +203,7 @@ class SshService {
         timeout: const Duration(seconds: 30),
       );
 
-      final client = SSHClient(
+      client = SSHClient(
         socket,
         username: config.username,
         onPasswordRequest: () => config.password ?? '',
@@ -210,9 +224,11 @@ class SshService {
     } on SSHAuthFailError {
       throw Exception('认证失败: 用户名或密码错误');
     } on SSHAuthAbortError {
-      throw Exception('认证中断: 连接被服务器关闭');
+      rethrow;
     } catch (e) {
       throw Exception('连接失败: $e');
+    } finally {
+      if (!identical(_activeSessions[id]?.client, client)) client?.close();
     }
   }
 

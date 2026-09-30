@@ -19,6 +19,45 @@ void main() {
   });
   tearDownAll(() async => settingsDirectory.delete(recursive: true));
 
+  testWidgets(
+      'draft and completed chat show remote session state and can close',
+      (tester) async {
+    final now = DateTime(2026, 9, 24);
+    var closes = 0;
+    await tester.pumpWidget(MaterialApp(
+      home: CodexChatScreen(
+        connection: SshConnection(
+          id: 'persistent-session',
+          name: 'test',
+          host: 'localhost',
+          username: 'test',
+          createdAt: now,
+          updatedAt: now,
+        ),
+        workDir: '/project',
+        sendMessage: (_) async =>
+            const CodexChatResult(threadId: 'thread', answer: '答复'),
+        closeRemoteSession: (_) async {
+          closes++;
+        },
+      ),
+    ));
+    expect(find.text('尚未启动·发送首条消息后启动远程会话'), findsOneWidget);
+    await tester.enterText(find.byKey(const ValueKey('chat-input')), '问题');
+    await tester.tap(find.byKey(const ValueKey('chat-send')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('等待消息·远程已打开'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('chat-display-options')));
+    await tester.pumpAndSettle();
+    expect(find.text('关闭远程会话'), findsOneWidget);
+    await tester.tap(find.text('关闭远程会话'));
+    await tester.pump();
+    expect(closes, 1);
+    expect(find.text('等待消息·远程已关闭'), findsOneWidget);
+  });
+
   testWidgets('/clear starts a new context without erasing visible messages',
       (tester) async {
     final now = DateTime(2026, 9, 24);

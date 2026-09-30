@@ -78,6 +78,34 @@ void main() {
     await tester.pump();
   }
 
+  testWidgets('Claude header and activity follow live runtime transitions', (tester) async {
+    var status = 'busy';
+    var alive = true;
+    ClaudeRuntimeService.requestOverride = (_, action, payload) async =>
+        {'session': {...session(status), 'alive': alive}, 'messages': []};
+    await tester.pumpWidget(viewer((_) async => const []));
+    await tester.pump();
+    expect(find.text('正在执行  ·  $sessionId'), findsOneWidget);
+    expect(find.byKey(const ValueKey('viewer-terminal-status')), findsOneWidget);
+    status = 'awaiting_input';
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+    expect(find.text('等待确认  ·  $sessionId'), findsOneWidget);
+    expect(find.byKey(const ValueKey('viewer-terminal-status')), findsNothing);
+    status = 'ready';
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+    expect(find.text('等待消息  ·  $sessionId'), findsOneWidget);
+    alive = false;
+    status = 'busy';
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('viewer-terminal-status')), findsNothing);
+    expect(find.text('当前查看历史，继续后可发送消息'), findsOneWidget);
+    expect(find.byKey(const ValueKey('claude-message-input')), findsNothing);
+    await disposeViewer(tester);
+  });
+
   testWidgets(
       'busy Claude queues text, preserves remote receipt on reopen, and skips Codex services',
       (tester) async {

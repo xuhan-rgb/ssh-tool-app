@@ -1,8 +1,10 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 import 'package:ssh_tool_app/models/ssh_connection.dart';
@@ -63,6 +65,7 @@ void main() {
           'id': 'thread',
           'cwd': '/project',
           'title': '缓存的对话',
+          'remoteOpen': true,
           'state': 'complete',
         });
     await CodexSessionService.listAll(connection.id);
@@ -76,6 +79,52 @@ void main() {
     await tester.pump();
     expect(find.text('缓存的对话'), findsOneWidget);
     expect(connecting.isCompleted, isFalse);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('picker retries failed SSH authentication on the next automatic refresh',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    // Keep bundled-script reads in fakeAsync, so the test can settle without real I/O.
+    tester.binding.defaultBinaryMessenger.setMockMessageHandler(
+      'flutter/assets',
+      (message) async => ByteData.sublistView(
+          File(utf8.decode(message!.buffer.asUint8List())).readAsBytesSync()),
+    );
+    addTearDown(() => tester.binding.defaultBinaryMessenger
+        .setMockMessageHandler('flutter/assets', null));
+    rootBundle.evict('assets/codex_steer_message.py');
+    final firstConnection = Completer<void>();
+    final retryConnection = Completer<void>();
+    var attempts = 0;
+    CodexSessionService.runPythonOverride = (_, __, ___) async => '';
+    await tester.pumpWidget(MaterialApp(
+      home: CodexConversationPickerScreen(
+        connection: connection,
+        connect: () {
+          attempts++;
+          return attempts == 1 ? firstConnection.future : retryConnection.future;
+        },
+      ),
+    ));
+    await tester.pump();
+    expect(attempts, 1);
+    firstConnection.completeError(Exception('认证中断: 连接被服务器关闭'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.textContaining('认证中断'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 60));
+    await tester.pump();
+    expect(attempts, 2);
+    retryConnection.complete();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+    expect(find.textContaining('认证中断'), findsNothing);
+    expect(find.text('当前没有远程打开的对话'), findsOneWidget);
+    expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 

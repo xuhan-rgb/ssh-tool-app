@@ -14,6 +14,7 @@ from pathlib import Path
 WORKER = Path(__file__).resolve().parents[1] / "assets" / "codex_chat_worker.py"
 FAKE_CODEX = r'''#!/usr/bin/env python3
 import json
+import os
 import signal
 import sys
 import time
@@ -25,7 +26,7 @@ def stop(_signal, _frame):
     sys.exit(0)
 
 signal.signal(signal.SIGTERM, stop)
-(Path.home() / "codex_args.json").write_text(json.dumps(sys.argv[1:]))
+(Path.home() / "codex_args.json").write_text(json.dumps({"args": sys.argv[1:], "pid": os.getpid()}))
 experimental_api = False
 
 for line in sys.stdin:
@@ -44,6 +45,9 @@ for line in sys.stdin:
         print(json.dumps({"id": 2, "result": {"thread": {"id": thread_id}}}), flush=True)
     elif request_id == 3:
         print(json.dumps({"id": 3, "result": {}}), flush=True)
+        prompt_text = request.get("params", {}).get("input", [{}])[0].get("text", "")
+        if prompt_text == "server-dies":
+            sys.exit(0)
         print(json.dumps({"method": "turn/started", "params": {"turn": {"status": "inProgress"}}}), flush=True)
         print(json.dumps({"method": "item/reasoning/summaryTextDelta", "params":
                           {"itemId": "reason", "delta": "检查代码"}}), flush=True)
@@ -62,8 +66,18 @@ for line in sys.stdin:
                           {"itemId": "answer", "delta": "完成"}}), flush=True)
         print(json.dumps({"method": "item/completed", "params":
                           {"item": {"type": "agentMessage", "text": "后台完成"}}}), flush=True)
+        status = "failed" if prompt_text == "fail-turn" else "completed"
         print(json.dumps({"method": "turn/completed", "params":
-                          {"turn": {"status": "completed"}}}), flush=True)
+                          {"turn": {"status": status}}}), flush=True)
+        if prompt_text == "die-while-idle":
+            sys.exit(0)
+    elif request.get("method") == "turn/start":
+        print(json.dumps({"id": request_id, "result": {}}), flush=True)
+        print(json.dumps({"method": "item/agentMessage/delta", "params":
+                          {"itemId": "answer-2", "delta": "第二轮"}}), flush=True)
+        print(json.dumps({"method": "item/completed", "params":
+                          {"item": {"type": "agentMessage", "text": "第二轮完成"}}}), flush=True)
+        print(json.dumps({"method": "turn/completed", "params": {"turn": {"status": "completed"}}}), flush=True)
 '''
 
 
@@ -146,6 +160,11 @@ def test_tmux_job_survives_launcher_and_can_be_reconnected():
             offset = 0
             events = []
             reconnected_while_running = False
+            second_id = "abcdef0123456789abcdef0123456789"
+            second_request = {**request, "jobId": second_id, "threadId": "thread-test",
+                              "prompt": "继续对话", "model": "gpt-6-astra", "effort": "high"}
+            second_encoded = base64.b64encode(json.dumps(second_request).encode()).decode()
+            queued_second = False
             deadline = time.monotonic() + 5
             while time.monotonic() < deadline:
                 polled = subprocess.run(
@@ -167,22 +186,36 @@ def test_tmux_job_survives_launcher_and_can_be_reconnected():
                         text=True,
                     )
                     reconnected_while_running = (
-                        json.loads(recovered.stdout).get("jobId") == job_id
+                        json.loads(recovered.stdout).get("jobId") in (job_id, second_id)
                     )
+                    if not queued_second:
+                        assert json.loads(recovered.stdout).get("jobId") == job_id
+                    if snapshot["state"]["status"] == "running" and not queued_second:
+                        session_status = subprocess.run(["python3", str(WORKER), "session", "thread-test"],
+                                                        env=environment, check=True, capture_output=True, text=True)
+                        if json.loads(session_status.stdout) == {"open": True, "busy": True}:
+                            subprocess.run(["python3", str(WORKER), "start", second_encoded], env=environment,
+                                           check=True, capture_output=True, text=True)
+                            busy_close = subprocess.run(["python3", str(WORKER), "close", "thread-test"],
+                                                        env=environment, capture_output=True, text=True)
+                            assert busy_close.returncode != 0
+                            assert "仍有任务运行" in json.loads(busy_close.stdout)["error"]
+                            queued_second = True
                 if snapshot["state"]["status"] == "completed":
                     break
                 time.sleep(0.1)
-            assert snapshot["state"]["status"] == "completed"
+            assert snapshot["state"]["status"] == "completed", (snapshot["state"], (home / ".ssh_tool" / "chat_jobs" / job_id / "codex.stderr").read_text())
             assert snapshot["state"]["threadId"] == "thread-test"
             assert snapshot["state"]["answer"] == "后台完成"
-            assert json.loads((home / "codex_args.json").read_text()) == [
+            app_server = json.loads((home / "codex_args.json").read_text())
+            assert app_server["args"] == [
                 "--dangerously-bypass-approvals-and-sandbox",
                 "app-server", "--stdio",
             ]
             requests = [json.loads(line) for line in
                         (home / "codex_requests.jsonl").read_text().splitlines()]
             assert next(request for request in requests if request.get("id") == 2)["params"]["sandbox"] == "danger-full-access"
-            assert (home / "codex_stopped").exists()
+            assert not (home / "codex_stopped").exists()
             assert any(event.get("type") == "partial" for event in events)
             assert any(event.get("delta") == "后台" for event in events)
             assert any(event.get("type") == "activityDelta" and "检查代码" in event.get("delta", "") for event in events)
@@ -203,12 +236,74 @@ def test_tmux_job_survives_launcher_and_can_be_reconnected():
                 capture_output=True,
                 text=True,
             )
-            assert json.loads(recovered.stdout)["jobId"] == job_id
+            assert json.loads(recovered.stdout)["jobId"] in (job_id, second_id)
+            session_result = subprocess.run(["python3", str(WORKER), "session", "thread-test"],
+                                             env=environment, check=True, capture_output=True, text=True)
+            assert json.loads(session_result.stdout) == {"open": True, "busy": False}
+            assert queued_second
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                second_state = json.loads((home / ".ssh_tool" / "chat_jobs" / second_id / "state.json").read_text())
+                if second_state["status"] == "completed":
+                    break
+                time.sleep(0.05)
+            assert second_state["status"] == "completed", second_state
+            assert second_state["answer"] == "第二轮完成"
+            assert json.loads((home / "codex_args.json").read_text())["pid"] == app_server["pid"]
+            idle_status = subprocess.run(["python3", str(WORKER), "session", "thread-test"],
+                                         env=environment, check=True, capture_output=True, text=True)
+            assert json.loads(idle_status.stdout) == {"open": True, "busy": False}
+            time.sleep(0.35)
+            third_id = "fedcba9876543210abcdef0123456789"
+            third_request = {**request, "jobId": third_id, "threadId": "thread-test",
+                             "prompt": "空闲后继续", "model": "gpt-6-luna", "effort": "low"}
+            third_encoded = base64.b64encode(json.dumps(third_request).encode()).decode()
+            for _ in range(2):
+                subprocess.run(["python3", str(WORKER), "start", third_encoded], env=environment,
+                               check=True, capture_output=True, text=True)
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                third_state = json.loads((home / ".ssh_tool" / "chat_jobs" / third_id / "state.json").read_text())
+                if third_state["status"] == "completed":
+                    break
+                time.sleep(0.05)
+            assert third_state["status"] == "completed", third_state
+            assert third_state["answer"] == "第二轮完成"
+            assert json.loads((home / "codex_args.json").read_text())["pid"] == app_server["pid"]
+            all_requests = [json.loads(line) for line in (home / "codex_requests.jsonl").read_text().splitlines()]
+            turn_requests = [item for item in all_requests if item.get("method") == "turn/start"]
+            assert len(turn_requests) == 3
+            assert turn_requests[1]["params"]["model"] == "gpt-6-astra"
+            assert turn_requests[2]["params"]["model"] == "gpt-6-luna"
+            closed = subprocess.run(["python3", str(WORKER), "close", "thread-test"], env=environment,
+                                    check=True, capture_output=True, text=True)
+            assert json.loads(closed.stdout) == {"closed": True, "open": False}
+            assert (home / "codex_stopped").exists()
         finally:
             if follower is not None and follower.poll() is None:
                 follower.terminate()
                 follower.wait(timeout=2)
             subprocess.run(["tmux", "kill-server"], env=environment, capture_output=True)
+
+
+def run_direct_job_and_close(home, job_id, thread_id):
+    environment = {**os.environ, "HOME": str(home), "TMUX_TMPDIR": str(home / "tmux")}
+    environment.pop("TMUX", None)
+    (home / "tmux").mkdir(exist_ok=True)
+    name = "worker-test-" + job_id[:12]
+    subprocess.run(["tmux", "new-session", "-d", "-s", name,
+                    f"python3 {WORKER} run {job_id}"], env=environment, check=True)
+    path = home / ".ssh_tool" / "chat_jobs" / job_id
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        state = json.loads((path / "state.json").read_text())
+        if state["status"] in ("completed", "failed"):
+            break
+        time.sleep(0.05)
+    assert state["status"] == "completed", state
+    closed = subprocess.run(["python3", str(WORKER), "close", thread_id], env=environment,
+                            check=True, capture_output=True, text=True)
+    assert json.loads(closed.stdout) == {"closed": True, "open": False}
 
 
 def test_fork_job_creates_a_new_thread_before_sending():
@@ -232,9 +327,9 @@ def test_fork_job_creates_a_new_thread_before_sending():
         }
         (path / "request.json").write_text(json.dumps(request))
         (path / "state.json").write_text(json.dumps({
-            "jobId": job_id, "threadId": "source-thread", "status": "starting"}))
-        subprocess.run(["python3", str(WORKER), "run", job_id],
-                       env={**os.environ, "HOME": temporary}, check=True)
+            "jobId": job_id, "threadId": "source-thread", "status": "starting",
+            "tmuxName": "worker-test-" + job_id[:12]}))
+        run_direct_job_and_close(home, job_id, "forked-thread")
         methods = [json.loads(line)["method"] for line in
                    (home / "codex_requests.jsonl").read_text().splitlines()]
         assert methods == ["initialize", "initialized", "thread/fork", "turn/start"]
@@ -258,9 +353,9 @@ def test_resume_job_declares_capability_for_excluding_turns():
             "model": "gpt-6-sol", "effort": "medium", "threadId": "source-thread",
         }))
         (path / "state.json").write_text(json.dumps({
-            "jobId": job_id, "threadId": "source-thread", "status": "starting"}))
-        subprocess.run(["python3", str(WORKER), "run", job_id],
-                       env={**os.environ, "HOME": temporary}, check=True)
+            "jobId": job_id, "threadId": "source-thread", "status": "starting",
+            "tmuxName": "worker-test-" + job_id[:12]}))
+        run_direct_job_and_close(home, job_id, "source-thread")
         state = json.loads((path / "state.json").read_text())
         assert state["status"] == "completed", state.get("error")
         requests = [json.loads(line) for line in
@@ -268,6 +363,41 @@ def test_resume_job_declares_capability_for_excluding_turns():
         assert requests[0]["params"]["capabilities"]["experimentalApi"] is True
         assert requests[2]["method"] == "thread/resume"
         assert requests[2]["params"]["excludeTurns"] is True
+
+
+def test_server_failure_and_idle_death_preserve_terminal_job_state():
+    for index, prompt, expected in ((1, "server-dies", "failed"),
+                                    (2, "fail-turn", "failed"),
+                                    (3, "die-while-idle", "completed")):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            binary = home / ".local" / "bin" / "codex"
+            binary.parent.mkdir(parents=True)
+            binary.write_text(FAKE_CODEX, encoding="utf-8")
+            binary.chmod(0o755)
+            env = {**os.environ, "HOME": str(home), "TMUX_TMPDIR": str(home / "tmux")}
+            env.pop("TMUX", None)
+            (home / "tmux").mkdir()
+            job_id = f"{index:032x}"
+            request = {"jobId": job_id, "workDir": temporary, "prompt": prompt,
+                       "model": "gpt-6-sol", "effort": "medium", "threadId": None}
+            encoded = base64.b64encode(json.dumps(request).encode()).decode()
+            subprocess.run(["python3", str(WORKER), "start", encoded], env=env,
+                           check=True, capture_output=True, text=True)
+            path = home / ".ssh_tool" / "chat_jobs" / job_id
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                state = json.loads((path / "state.json").read_text())
+                if state["status"] in ("completed", "failed"):
+                    time.sleep(0.2)
+                    if not subprocess.run(["tmux", "has-session", "-t", state["tmuxName"]],
+                                          env=env, capture_output=True).returncode == 0:
+                        break
+                time.sleep(0.05)
+            assert state["status"] == expected, state
+            session_status = subprocess.run(["python3", str(WORKER), "session", "thread-test"],
+                                            env=env, check=True, capture_output=True, text=True)
+            assert json.loads(session_status.stdout) == {"open": False, "busy": False}
 
 
 def test_start_rejects_a_thread_held_by_another_codex_process():

@@ -22,6 +22,86 @@ void main() {
     expect(models.last.defaultEffort, 'high');
   });
 
+  test('parses owned session status and session-list CLI responses', () {
+    final status =
+        CodexChatService.parseRemoteSessionStatus({'open': true, 'busy': true});
+    expect(status.open, isTrue);
+    expect(status.busy, isTrue);
+    expect(
+      CodexChatService.parseRemoteSessionStatus({'open': false, 'busy': false})
+          .open,
+      isFalse,
+    );
+    expect(
+      CodexChatService.parseOpenSessions({
+        'threadIds': ['first', 'second', 3, null]
+      }),
+      {'first', 'second'},
+    );
+    expect(CodexChatService.parseOpenSessions({}), isEmpty);
+  });
+
+  test('owned session worker CLI lists, closes idle, and rejects busy sessions',
+      () async {
+    final home = await Directory.systemTemp.createTemp('ssh-chat-sessions-');
+    try {
+      final sessions =
+          await Directory('${home.path}/.ssh_tool/chat_jobs/sessions')
+              .create(recursive: true);
+      final bin = await Directory('${home.path}/bin').create();
+      final tmux = File('${bin.path}/tmux');
+      const threadId = 'owned-thread';
+      final encoded =
+          base64Url.encode(utf8.encode(threadId)).replaceAll('=', '');
+      final metadata = File('${sessions.path}/$encoded.json');
+      await tmux.writeAsString(
+          '#!/bin/sh\ngrep -q closeRequested ${metadata.path} && exit 1\nexit 0\n');
+      await Process.run('chmod', ['+x', tmux.path]);
+      Future<void> writeSession({required bool busy}) =>
+          metadata.writeAsString(jsonEncode({
+            'threadId': threadId,
+            'ownerJobId': 'a' * 32,
+            'queueId': 'queue',
+            'tmuxName': 'ssh-chat-owned',
+            'busy': busy,
+          }));
+      await writeSession(busy: false);
+      final worker = File('assets/codex_chat_worker.py').absolute.path;
+      Future<ProcessResult> invoke(String command) => Process.run(
+            'python3',
+            [worker, command, if (command != 'sessions') threadId],
+            environment: {
+              'HOME': home.path,
+              'PATH': '${bin.path}:/usr/bin:/bin',
+            },
+          );
+
+      final status = await invoke('session');
+      expect(status.exitCode, 0, reason: status.stderr.toString());
+      expect(
+          jsonDecode(status.stdout as String), {'open': true, 'busy': false});
+      final listed = await invoke('sessions');
+      expect(listed.exitCode, 0, reason: listed.stderr.toString());
+      expect(jsonDecode(listed.stdout as String), {
+        'threadIds': [threadId]
+      });
+      final closed = await invoke('close');
+      expect(closed.exitCode, 0, reason: closed.stderr.toString());
+      expect(
+          jsonDecode(closed.stdout as String), {'closed': true, 'open': false});
+      expect(
+          jsonDecode(await metadata.readAsString())['closeRequested'], isTrue);
+
+      await writeSession(busy: true);
+      final rejected = await invoke('close');
+      expect(rejected.exitCode, 1);
+      expect(
+          jsonDecode(rejected.stdout as String)['error'], contains('仍有任务运行'));
+    } finally {
+      await home.delete(recursive: true);
+    }
+  });
+
   test('background job reports partial text and a completed same-id answer',
       () {
     final updates = <String>[];

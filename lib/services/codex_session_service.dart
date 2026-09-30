@@ -59,6 +59,8 @@ class CodexConversation {
   final String title;
   final CodexConversationState state;
   final bool writerLocked;
+  /// Whether a remote Codex instance holds this conversation; null if unknown.
+  final bool? remoteOpen;
   final bool directoryExists;
   final String preview;
   final bool isSubagent;
@@ -72,6 +74,7 @@ class CodexConversation {
     required this.title,
     this.state = CodexConversationState.unknown,
     this.writerLocked = false,
+    this.remoteOpen,
     this.directoryExists = true,
     this.preview = '',
     this.isSubagent = false,
@@ -89,7 +92,10 @@ class CodexConversation {
           state == CodexConversationState.aborted) &&
       directoryExists;
 
-  bool get canResume => canTakeover && !writerLocked;
+  bool get canResume => !writerLocked &&
+      (canTakeover ||
+          (!isSubagent && directoryExists && remoteOpen == false &&
+              state == CodexConversationState.pending));
 
   String get recoveryReason {
     if (isSubagent) {
@@ -180,6 +186,7 @@ class CodexConversationParser {
             title: (json['title'] as String? ?? '').trim(),
             state: _parseState(json['state'] as String?),
             writerLocked: json['writerLocked'] == true,
+            remoteOpen: json['remoteOpen'] as bool?,
             directoryExists: json['directoryExists'] != false,
             preview: (json['preview'] as String? ?? '').trim(),
             isSubagent: json['isSubagent'] == true,
@@ -583,7 +590,7 @@ class CodexSessionService {
   ) async {
     final raw = await _runPython(
       connectionId,
-      _listScript,
+      await _listScriptWithRpc(),
       [workDir],
     );
     return CodexConversationParser.parse(raw)
@@ -594,6 +601,13 @@ class CodexSessionService {
 
   static Future<List<CodexConversation>> listAll(String connectionId) async {
     return listAllPage(connectionId, 0);
+  }
+
+  static Future<List<CodexConversation>> listRemoteOpen(String connectionId) async {
+    final raw = await _runPython(connectionId, await _listScriptWithRpc(), ['__opened__']);
+    return CodexConversationParser.parse(raw)
+        .where((item) => item.remoteOpen == true && !item.isSubagent)
+        .toList();
   }
 
   static Future<List<CodexConversation>> listRunning(String connectionId) async {
@@ -620,7 +634,7 @@ class CodexSessionService {
       String connectionId) async {
     final raw = await _runPython(
       connectionId,
-      _listScript,
+      await _listScriptWithRpc(),
       ['__running__'],
     );
     return CodexConversationParser.parse(raw)
@@ -658,7 +672,7 @@ class CodexSessionService {
       String connectionId, int offset) async {
     final raw = await _runPython(
       connectionId,
-      _listScript,
+      await _listScriptWithRpc(),
       ['__all__', '$offset'],
     );
     return CodexConversationParser.parse(raw)
@@ -673,7 +687,7 @@ class CodexSessionService {
   ) async {
     final raw = await _runPython(
       connectionId,
-      _listScript,
+      await _listScriptWithRpc(),
       ['id:$conversationId'],
     );
     return CodexConversationParser.parse(raw).firstOrNull;
@@ -949,6 +963,12 @@ if result.stderr:
 sys.exit(result.returncode)
 ''';
 
+  static Future<String> _listScriptWithRpc() async {
+    // Share the dependency-free transport; do not include the message-sending entry point.
+    final source = await rootBundle.loadString('assets/codex_steer_message.py');
+    return '${source.split('\ndef steer(').first}\n$_listScript';
+  }
+
   /// 读取指定工作目录下的会话状态。状态判定与 codex-thread-inspect.sh 一致。
   static const String _listScript = r'''import datetime
 import json
@@ -963,7 +983,7 @@ offset = max(0, int(sys.argv[2])) if len(sys.argv) > 2 else 0
 requested_id = requested_value[3:] if requested_value.startswith("id:") else None
 requested_dir = (
     None
-    if requested_value in ("", "__all__", "__running__") or requested_id is not None
+    if requested_value in ("", "__all__", "__running__", "__opened__") or requested_id is not None
     else Path(os.path.expanduser(requested_value)).resolve()
 )
 codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
@@ -972,6 +992,7 @@ session_index_path = codex_home / "session_index.jsonl"
 HEAD_BYTES = 128 * 1024
 TAIL_BYTES = 64 * 1024
 MAX_SESSIONS = 200
+shared_daemon_state = None
 
 
 def load_session_index():
@@ -1041,17 +1062,78 @@ def timestamp_to_sort(value, fallback):
 
 def lock_is_held(thread_id):
     lock_path = codex_home / "thread-writer-locks" / f"{thread_id}.lock"
-    if not lock_path.exists():
-        return False
     try:
-        with lock_path.open("a+") as stream:
+        with lock_path.open("rb") as stream:
             fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
             fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
             return False
     except BlockingIOError:
         return True
-    except OSError:
+    except FileNotFoundError:
         return False
+    except OSError:
+        return None
+
+
+def shared_daemon_threads():
+    global shared_daemon_state
+    if shared_daemon_state is not None:
+        return shared_daemon_state
+    socket_path = codex_home / "app-server-control" / "app-server-control.sock"
+    shared_inodes = set()
+    shared_pids = {}
+    if socket_path.exists():
+        for line in Path("/proc/locks").read_text().splitlines():
+            fields = line.split()
+            if len(fields) < 8 or fields[1] != "FLOCK" or fields[3] != "WRITE":
+                continue
+            pid = fields[4]
+            if pid not in shared_pids:
+                try:
+                    args = (Path("/proc") / pid / "cmdline").read_bytes().split(b"\0")
+                    endpoint = ("unix://" + str(socket_path)).encode()
+                    shared_pids[pid] = b"app-server" in args and (
+                        endpoint in args or
+                        (b"--managed-daemon" in args and b"unix://" in args)
+                    )
+                except OSError:
+                    shared_pids[pid] = False
+            if shared_pids[pid]:
+                major, minor, inode = fields[5].split(":")
+                shared_inodes.add((int(major, 16), int(minor, 16), int(inode)))
+    loaded = set()
+    if shared_inodes:
+        rpc = RpcConnection(socket_path)
+        try:
+            rpc.request("initialize", {
+                "clientInfo": {"name": "ssh_tool_discovery", "version": "1"},
+                "capabilities": {"experimentalApi": True},
+            })
+            rpc.send({"method": "initialized", "params": {}})
+            cursor = None
+            while True:
+                page = rpc.request("thread/loaded/list", {"cursor": cursor})
+                loaded.update(page["data"])
+                cursor = page.get("nextCursor")
+                if not cursor:
+                    break
+        finally:
+            rpc.close()
+    shared_daemon_state = loaded, shared_inodes
+    return shared_daemon_state
+
+
+def remote_is_open(thread_id, writer_locked):
+    if writer_locked is not True:
+        return writer_locked
+    loaded, shared_inodes = shared_daemon_threads()
+    try:
+        stat = (codex_home / "thread-writer-locks" / f"{thread_id}.lock").stat()
+        identity = (os.major(stat.st_dev), os.minor(stat.st_dev), stat.st_ino)
+    except OSError:
+        return None
+    # A shared daemon may retain a writer after its terminal has unsubscribed.
+    return thread_id in loaded if identity in shared_inodes else True
 
 
 def latest_turn_state(path, writer_locked):
@@ -1097,7 +1179,8 @@ def inspect_session(path):
         mtime = datetime.datetime.fromtimestamp(
             file_stat.st_mtime, datetime.timezone.utc
         ).isoformat().replace("+00:00", "Z")
-        with path.open(encoding="utf-8") as stream:
+        # 尾部按字节定位，使用二进制读取；截断的首行由 json_lines 跳过。
+        with path.open("rb") as stream:
             first = json.loads(stream.readline())
             meta = first.get("payload", {})
             if first.get("type") != "session_meta":
@@ -1179,11 +1262,10 @@ def inspect_session(path):
                     consume(item)
 
             writer_locked = lock_is_held(thread_id)
-            state, completed_at = latest_turn_state(path, writer_locked)
-            if state == "not_started":
-                if not writer_locked:
-                    return None
-                state = "running"
+            remote_open = remote_is_open(thread_id, writer_locked)
+            state, completed_at = latest_turn_state(path, remote_open)
+            if state == "not_started" and not writer_locked:
+                return None
 
             return {
                 "id": thread_id,
@@ -1193,7 +1275,8 @@ def inspect_session(path):
                 "title": title,
                 "preview": preview,
                 "state": state,
-                "writerLocked": writer_locked,
+                "writerLocked": writer_locked is True,
+                "remoteOpen": remote_open,
                 "directoryExists": os.path.isdir(cwd),
                 "isSubagent": is_subagent,
                 "parentConversationId": parent_id,
@@ -1215,7 +1298,7 @@ def candidate_paths():
         ):
             return []
         return list(sessions_dir.rglob(f"*-{requested_id}.jsonl"))[:1]
-    if requested_value == "__running__":
+    if requested_value in ("__running__", "__opened__"):
         candidates = []
         for path in sessions_dir.rglob("rollout-*.jsonl"):
             thread_id = path_thread_id(path)
@@ -1229,41 +1312,34 @@ def candidate_paths():
         except OSError:
             continue
 
-    if requested_dir is None and session_index:
-        path_by_id = {path_thread_id(path): path for _, path in paths}
-        indexed_paths = []
-        used = set()
-        indexed_items = sorted(
-            session_index.items(),
-            key=lambda value: timestamp_to_sort(value[1].get("updated_at"), 0),
+    if requested_dir is None:
+        # 新会话可能尚未写入索引，按文件时间参与同一次排序后再分页。
+        paths.sort(
+            key=lambda value: timestamp_to_sort(
+                session_index.get(path_thread_id(value[1]), {}).get("updated_at"),
+                value[0],
+            ),
             reverse=True,
         )
-        for thread_id, _ in indexed_items:
-            path = path_by_id.get(thread_id)
-            if path is not None:
-                indexed_paths.append(path)
-                used.add(path)
-        remaining = [path for _, path in paths if path not in used]
-        remaining.sort(key=lambda path: path.stat().st_mtime, reverse=True)
-        return (indexed_paths + remaining)[offset:offset + MAX_SESSIONS]
-
-    if requested_dir is None:
-        paths.sort(key=lambda value: value[0], reverse=True)
         paths = paths[offset:offset + MAX_SESSIONS]
     return [path for _, path in paths]
 
 
 if sessions_dir.is_dir():
+    shared_daemon_threads()
     results = []
     for session_path in candidate_paths():
         item = inspect_session(session_path)
         if item and (
             requested_value != "__running__"
             or (item["state"] == "running" and not item["isSubagent"])
+        ) and (
+            requested_value != "__opened__"
+            or (item["remoteOpen"] is True and not item["isSubagent"])
         ):
             results.append(item)
     results.sort(key=lambda item: item.get("_sortTime", 0), reverse=True)
-    for item in results if requested_value == "__running__" else results[:MAX_SESSIONS]:
+    for item in results if requested_value in ("__running__", "__opened__") else results[:MAX_SESSIONS]:
         item.pop("_sortTime", None)
         print(json.dumps(item, ensure_ascii=False))
 ''';

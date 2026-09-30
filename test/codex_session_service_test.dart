@@ -9,6 +9,33 @@ import 'package:ssh_tool_app/services/codex_session_service.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('only confirmed closed pending conversations can be reactivated', () {
+    CodexConversation pending({bool? open, bool locked = false,
+        bool directoryExists = true, bool subagent = false}) => CodexConversation(
+      id: 'pending', cwd: '/project', updatedAt: null, title: 'unfinished',
+      state: CodexConversationState.pending, remoteOpen: open,
+      writerLocked: locked, directoryExists: directoryExists,
+      isSubagent: subagent,
+    );
+    expect(pending(open: false).canResume, isTrue);
+    expect(pending(open: true).canResume, isFalse);
+    expect(pending().canResume, isFalse);
+    expect(pending(open: false, locked: true).canResume, isFalse);
+    expect(pending(open: false, directoryExists: false).canResume, isFalse);
+    expect(pending(open: false, subagent: true).canResume, isFalse);
+  });
+
+  test('parses remote open state independently of task completion', () {
+    for (final open in [true, false, null]) {
+      final conversation = CodexConversationParser.parse(jsonEncode({
+        'id': 'completed', 'cwd': '/project', 'state': 'complete',
+        'remoteOpen': open,
+      })).single;
+      expect(conversation.state, CodexConversationState.complete);
+      expect(conversation.remoteOpen, open);
+    }
+  });
+
   test('terminal conversation resolver is bundled with the app', () async {
     final script = await rootBundle.loadString(
       'assets/codex_terminal_session_id.py',
@@ -399,11 +426,13 @@ void main() {
       () async {
     CodexSessionService.clearCache();
     final responses = <Completer<String>>[];
+    final started = [Completer<void>(), Completer<void>()];
     var calls = 0;
     CodexSessionService.runPythonOverride = (connectionId, script, args) {
       calls++;
       final response = Completer<String>();
       responses.add(response);
+      started[calls - 1].complete();
       return response.future;
     };
     addTearDown(() {
@@ -418,12 +447,14 @@ void main() {
 
     final first = CodexSessionService.listRunning('connection');
     final joined = CodexSessionService.listRunning('connection');
+    await started[0].future;
     expect(calls, 1);
     expect(
         CodexSessionService.cachedRunningConversations('connection'), isNull);
 
     CodexSessionService.clearCache('connection');
     final replacement = CodexSessionService.listRunning('connection');
+    await started[1].future;
     expect(calls, 2);
     responses[0].complete(result('stale'));
     expect((await first).single.id, 'stale');
@@ -562,7 +593,8 @@ void main() {
           CodexConversationParser.parse(result.stdout as String);
       expect(conversations, hasLength(1));
       expect(conversations.single.state, CodexConversationState.pending);
-      expect(conversations.single.canResume, isFalse);
+      expect(conversations.single.remoteOpen, isFalse);
+      expect(conversations.single.canResume, isTrue);
     } finally {
       await codexHome.delete(recursive: true);
     }

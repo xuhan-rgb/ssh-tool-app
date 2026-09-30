@@ -24,6 +24,549 @@ void main() {
     await settingsDirectory.delete(recursive: true);
   });
 
+  testWidgets('other-end running status contains a compact animation that disappears on completion', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    var state = CodexConversationState.running;
+    await tester.pumpWidget(MaterialApp(theme: AppTheme.darkTheme,
+      home: CodexSessionDialog(defaultName: 'codex', defaultWorkDir: '/project',
+        loadConversations: (_) async => [CodexConversation(id: 'progress',
+          cwd: '/project', title: '正在执行的任务', updatedAt: null,
+          state: state, remoteOpen: true)],
+        loadOpenedSessions: () async => const [],
+        loadRunningChatJobs: () async => const {},
+        loadRecords: (_) async => const [],
+        loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
+      )));
+    await tester.pump();
+    final progress = find.byKey(const ValueKey('conversation-progress-progress'));
+    expect(progress, findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(tester.widget<LinearProgressIndicator>(progress).value, isNull);
+    expect(find.descendant(
+        of: find.byKey(const ValueKey('conversation-state-progress')),
+        matching: progress), findsNothing);
+    expect(tester.getTopLeft(progress).dy, greaterThan(tester.getBottomLeft(
+        find.byKey(const ValueKey('conversation-state-progress'))).dy));
+    expect(tester.getSize(progress), const Size(36, 3));
+    await tester.pump(const Duration(milliseconds: 700));
+    expect(tester.getSize(progress), const Size(36, 3));
+    state = CodexConversationState.complete;
+    await tester.pump(const Duration(seconds: 60));
+    await tester.pumpAndSettle();
+    expect(progress, findsNothing);
+    expect(find.text('等待消息'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('app and unclassified running conversations have no progress animation', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final opened = Completer<List<OpenedCodexSession>>();
+    await tester.pumpWidget(MaterialApp(home: CodexSessionDialog(
+      defaultName: 'codex', defaultWorkDir: '/project',
+      loadConversations: (_) async => const [
+        CodexConversation(id: 'app-progress', cwd: '/project', title: '本软件任务',
+            updatedAt: null, state: CodexConversationState.running, remoteOpen: true),
+        CodexConversation(id: 'external-progress', cwd: '/project', title: '其他端任务',
+            updatedAt: null, state: CodexConversationState.running, remoteOpen: true),
+      ],
+      loadOpenedSessions: () => opened.future,
+      loadRunningChatJobs: () async => {'app-progress': 'job'},
+      loadRecords: (_) async => const [],
+      loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
+    )));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('conversation-progress-app-progress')), findsNothing);
+    expect(find.byKey(const ValueKey('conversation-progress-external-progress')), findsNothing);
+    opened.complete(const []);
+    await tester.pump();
+    expect(find.byKey(const ValueKey('conversation-progress-app-progress')), findsNothing);
+    expect(find.byKey(const ValueKey('conversation-progress-external-progress')), findsOneWidget);
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('remote discovery detects additions and closures every five seconds independently of history', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    var openLoads = 0;
+    var historyLoads = 0;
+    final pending = Completer<List<CodexConversation>>();
+    const idle = CodexConversation(id: 'discovered-idle', cwd: '/project',
+      title: '新增远程对话', updatedAt: null,
+      state: CodexConversationState.notStarted, remoteOpen: true);
+    await tester.pumpWidget(MaterialApp(home: CodexSessionDialog(
+      defaultName: 'codex', defaultWorkDir: '/project',
+      loadConversations: (_) {
+        historyLoads++;
+        return Completer<List<CodexConversation>>().future;
+      },
+      loadRemoteOpenConversations: () async {
+        openLoads++;
+        if (openLoads == 1) return const [];
+        if (openLoads == 2) return pending.future;
+        return const [];
+      },
+      loadRecords: (_) async => const [],
+      loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
+    )));
+    await tester.pump();
+    expect(openLoads, 1);
+    await tester.pump(const Duration(seconds: 5));
+    expect(openLoads, 2);
+    await tester.pump(const Duration(seconds: 5));
+    expect(openLoads, 2);
+    pending.complete(const [idle]);
+    await tester.pump();
+    expect(find.text('新增远程对话'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump();
+    expect(openLoads, 3);
+    expect(find.text('新增远程对话'), findsNothing);
+    expect(historyLoads, 1);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('remote closure updates history and favorites before the history refresh', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const conversation = CodexConversation(id: 'hello-closed', cwd: '/project',
+      title: 'Respond to hello', updatedAt: null,
+      state: CodexConversationState.complete, remoteOpen: true, writerLocked: true);
+    var opened = true;
+    var historyLoads = 0;
+    await tester.pumpWidget(MaterialApp(home: CodexSessionDialog(
+      defaultName: 'codex', defaultWorkDir: '/project',
+      initialFavoriteConversations: const {'hello-closed'},
+      loadConversations: (_) async { historyLoads++; return const [conversation]; },
+      loadRemoteOpenConversations: () async => opened ? const [conversation] : const [],
+      loadRecords: (_) async => const [],
+      loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
+    )));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('conversation-filter-all')));
+    await tester.pumpAndSettle();
+    expect(find.text('远程已打开'), findsOneWidget);
+    opened = false;
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    expect(historyLoads, 1);
+    expect(find.text('远程已关闭'), findsOneWidget);
+    expect(find.text('远程已打开'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('favorites-section-tab')));
+    await tester.pumpAndSettle();
+    expect(find.text('Respond to hello'), findsOneWidget);
+    expect(find.text('远程已关闭'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('running list refreshes every five seconds without overlap and returns to idle cadence', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    var loads = 0;
+    var state = CodexConversationState.running;
+    final pending = Completer<List<CodexConversation>>();
+    List<CodexConversation> rows() => [CodexConversation(
+      id: 'list-fast', cwd: '/project', title: '列表执行任务', updatedAt: null,
+      state: state, remoteOpen: true)];
+    await tester.pumpWidget(MaterialApp(home: CodexSessionDialog(
+      defaultName: 'codex', defaultWorkDir: '/project',
+      loadConversations: (_) async {
+        loads++;
+        return loads == 2 ? pending.future : rows();
+      },
+      loadRecords: (_) async => const [],
+      loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
+    )));
+    await tester.pumpAndSettle();
+    expect(loads, 1);
+    await tester.pump(const Duration(seconds: 4));
+    expect(loads, 1);
+    await tester.pump(const Duration(seconds: 1));
+    expect(loads, 2);
+    await tester.pump(const Duration(seconds: 10));
+    expect(loads, 2);
+    state = CodexConversationState.complete;
+    pending.complete(rows());
+    await tester.pumpAndSettle();
+    await tester.pump(const Duration(seconds: 45));
+    expect(loads, 2);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
+    expect(loads, 3);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('viewed running conversation refreshes each second without overlapping reads',
+      (tester) async {
+    var loads = 0;
+    final pending = Completer<List<CodexConversationRecord>>();
+    await tester.pumpWidget(MaterialApp(home: CodexConversationViewerDialog(
+      conversation: const CodexConversation(id: 'fast-refresh', cwd: '/project', title: '正在查看',
+          updatedAt: null, state: CodexConversationState.running),
+      loadRecords: (_) async {
+        loads++;
+        if (loads == 2) return pending.future;
+        return const [CodexConversationRecord(kind: 'task_started', timestamp: null, text: '开始')];
+      },
+    )));
+    await tester.pump();
+    expect(loads, 1);
+    await tester.pump(const Duration(seconds: 1));
+    expect(loads, 2);
+    await tester.pump(const Duration(seconds: 3));
+    expect(loads, 2);
+    pending.complete(const [CodexConversationRecord(kind: 'task_complete', timestamp: null, text: '完成')]);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 5));
+    expect(loads, 2);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('viewed open idle conversation detects a new turn and stops after closing viewer',
+      (tester) async {
+    var loads = 0;
+    await tester.pumpWidget(MaterialApp(home: CodexConversationViewerDialog(
+      conversation: const CodexConversation(id: 'idle-refresh', cwd: '/project', title: '空闲对话',
+          updatedAt: null, state: CodexConversationState.complete, remoteOpen: true),
+      loadRecords: (_) async {
+        loads++;
+        return [CodexConversationRecord(kind: loads == 1 ? 'task_complete' : 'task_started',
+            timestamp: null, text: loads == 1 ? '完成' : '新一轮已开始')];
+      },
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 4));
+    expect(loads, 1);
+    await tester.pump(const Duration(seconds: 1));
+    await tester.pump();
+    expect(loads, 2);
+    await tester.pump(const Duration(seconds: 1));
+    expect(loads, 3);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(seconds: 5));
+    expect(loads, 3);
+  });
+
+  for (final remoteOpenView in [true, false]) {
+    testWidgets('phone long press favorite works in ${remoteOpenView ? 'remote open' : 'history'} and favorites omit opened sessions',
+        (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      const conversation = CodexConversation(
+        id: 'favorite-target', cwd: '/project', updatedAt: null,
+        title: '可以收藏的对话', state: CodexConversationState.complete,
+        remoteOpen: true, writerLocked: true,
+      );
+      Set<String> saved = {};
+      await tester.pumpWidget(MaterialApp(theme: AppTheme.darkTheme,
+        home: CodexSessionDialog(
+          defaultName: 'codex', defaultWorkDir: '/project',
+          loadConversations: (_) async => remoteOpenView ? const [] : const [conversation],
+          loadRemoteOpenConversations: remoteOpenView ? () async => const [conversation] : null,
+          loadOpenedSessions: () async => const [
+            OpenedCodexSession(name: 'unfavorited-terminal', workDir: '/elsewhere'),
+          ],
+          loadOpenChatSessions: () async => {'favorite-target'},
+          loadRunningChatJobs: () async => {},
+          saveFavoriteConversations: (_, ids) async => saved = {...ids},
+          loadRecords: (_) async => const [],
+          loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
+        )));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('favorite-conversation-favorite-target')), findsNothing);
+      await tester.longPress(find.text('可以收藏的对话'));
+      await tester.pumpAndSettle();
+      expect(find.text('收藏对话'), findsOneWidget);
+      await tester.tap(find.text('收藏对话'));
+      await tester.pumpAndSettle();
+      expect(saved, {'favorite-target'});
+      expect(find.byKey(const ValueKey('favorite-marker-favorite-target')), findsOneWidget);
+      expect(find.byType(CodexSessionDialog), findsOneWidget,
+          reason: 'Long pressing must not open the owned chat');
+      await tester.tap(find.byKey(const ValueKey('favorites-section-tab')));
+      await tester.pumpAndSettle();
+      expect(find.text('可以收藏的对话'), findsOneWidget);
+      expect(find.textContaining('当前打开'), findsNothing);
+      expect(find.byKey(const ValueKey('opened-session-unfavorited-terminal')), findsNothing);
+      await tester.longPress(find.text('可以收藏的对话'));
+      await tester.pumpAndSettle();
+      expect(find.text('取消收藏'), findsOneWidget);
+      await tester.tap(find.text('取消收藏'));
+      await tester.pumpAndSettle();
+      expect(saved, isEmpty);
+      expect(find.text('可以收藏的对话'), findsNothing);
+      await tester.tap(find.byTooltip('按时间筛选'));
+      await tester.pumpAndSettle();
+      expect(find.text('昨天'), findsNothing);
+      expect(find.text('全部时间'), findsNothing);
+      expect(find.text('近 30 天'), findsNothing);
+      for (final label in ['今天', '近 7 天']) {
+        expect(find.text(label), findsOneWidget);
+      }
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
+  testWidgets('idle owned remote session opens chat without takeover', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    CodexSessionConfig? result;
+    const conversation = CodexConversation(
+      id: 'owned-idle', cwd: '/project', updatedAt: null,
+      title: '手机创建的空闲对话', state: CodexConversationState.complete,
+      remoteOpen: true, writerLocked: true,
+    );
+    await tester.pumpWidget(MaterialApp(home: Builder(builder: (context) =>
+      Scaffold(body: TextButton(onPressed: () async {
+        result = await showDialog<CodexSessionConfig>(context: context,
+          builder: (_) => CodexSessionDialog(
+            defaultName: 'codex', defaultWorkDir: '/project',
+            loadConversations: (_) async => const [conversation],
+            loadRemoteOpenConversations: () async => const [conversation],
+            loadOpenChatSessions: () async => {'owned-idle'},
+            loadRunningChatJobs: () async => {},
+            loadRecords: (_) async => const [],
+            loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
+          ));
+      }, child: const Text('选择对话'))))));
+    await tester.tap(find.text('选择对话'));
+    await tester.pumpAndSettle();
+    expect(find.text('等待消息'), findsOneWidget);
+    expect(find.text('需接管'), findsNothing);
+    await tester.tap(find.text('手机创建的空闲对话'));
+    await tester.pumpAndSettle();
+    expect(result?.resumeConversation?.id, 'owned-idle');
+    expect(result?.openAsChat, isTrue);
+    expect(result?.stopWriterBeforeLaunch, isFalse);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('completed remote session turns gray after it closes', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    bool? remoteOpen = true;
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.darkTheme,
+      home: CodexSessionDialog(
+        defaultName: 'codex',
+        defaultWorkDir: '/project',
+        loadConversations: (_) async => [CodexConversation(
+          id: 'completed', cwd: '/project', updatedAt: null,
+          title: '完成后的会话', state: CodexConversationState.complete,
+          remoteOpen: remoteOpen,
+        )],
+        loadRecords: (_) async => const [],
+        loadDirectories: (_) async => const RemoteDirectoryListing(
+          path: '/project', dirs: [],
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    expect(find.text('远程已打开'), findsOneWidget);
+    expect(find.text('等待消息'), findsOneWidget);
+    expect(tester.widget<Text>(find.text('等待消息')).style?.color, AppTheme.green);
+    expect(tester.widget<Text>(find.text('完成后的会话')).style?.color,
+        AppTheme.textPrimary);
+    remoteOpen = false;
+    await tester.pump(const Duration(seconds: 60));
+    await tester.pumpAndSettle();
+    expect(find.text('远程已关闭'), findsOneWidget);
+    expect(find.text('已完成'), findsOneWidget);
+    expect(tester.widget<Text>(find.text('已完成')).style?.color, AppTheme.textMuted);
+    final badge = tester.widget<Container>(
+        find.byKey(const ValueKey('conversation-state-completed')));
+    final decoration = badge.decoration! as BoxDecoration;
+    expect(decoration.color, AppTheme.textMuted.withValues(alpha: 0.14));
+    expect((decoration.border! as Border).top.color,
+        AppTheme.textMuted.withValues(alpha: 0.45));
+    expect(tester.widget<Text>(find.text('完成后的会话')).style?.color,
+        AppTheme.textMuted);
+    await tester.tap(find.text('完成后的会话'));
+    await tester.pump();
+    expect(tester.widget<FilledButton>(
+        find.widgetWithText(FilledButton, '重新激活对话')).onPressed, isNotNull);
+    remoteOpen = null;
+    await tester.pump(const Duration(seconds: 60));
+    await tester.pumpAndSettle();
+    expect(find.text('打开状态未知'), findsOneWidget);
+    expect(find.text('远程已关闭'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('remote open filter includes idle sessions outside history and excludes closed',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    CodexConversation conversation(String id, bool open, CodexConversationState state) =>
+        CodexConversation(id: id, cwd: '/project', updatedAt: null,
+            title: id, remoteOpen: open, state: state);
+    final running = conversation('运行中的对话', true, CodexConversationState.running);
+    const idle = CodexConversation(id: 'outside', cwd: '/other', updatedAt: null,
+        title: '非收藏目录的已完成对话', remoteOpen: true,
+        state: CodexConversationState.complete);
+    final closed = conversation('关闭的对话', false, CodexConversationState.complete);
+    var opened = [running, idle];
+    var openLoads = 0;
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.darkTheme,
+      home: CodexSessionDialog(
+        defaultName: 'codex', defaultWorkDir: '/project',
+        initialFavoriteConversations: {closed.id},
+        initialFavoriteDirectories: const {'/project'},
+        initialFilteredDirectories: const {'/project'},
+        loadConversations: (_) async => [running, closed],
+        startWithAllConversations: true,
+        loadAllConversations: () async => [running, closed],
+        loadMoreConversations: (_) async => const [],
+        loadRemoteOpenConversations: () async { openLoads++; return opened; },
+        loadRecords: (_) async => const [],
+        loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
+      ),
+    ));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('远程打开'), findsOneWidget);
+    expect(openLoads, 1);
+    expect(find.text('加载更早对话'), findsNothing);
+    expect(find.text(running.title), findsOneWidget);
+    expect(find.text(idle.title), findsOneWidget);
+    expect(tester.getTopLeft(find.text(running.title)).dy,
+        lessThan(tester.getTopLeft(find.text(idle.title)).dy));
+    expect(tester.widget<IconButton>(find.byKey(
+        const ValueKey('conversation-directory-filter'))).onPressed, isNull);
+    expect(find.text(closed.title), findsNothing);
+    await tester.tap(find.text(running.title));
+    await tester.pump();
+    expect(tester.widget<Scaffold>(find.byType(Scaffold).last).bottomNavigationBar, isNull);
+    expect(find.byKey(const ValueKey('mobile-conversation-more')), findsNothing);
+    expect(find.textContaining('当前不可继续'), findsNothing);
+    expect(find.byKey(ValueKey('view-conversation-${running.id}')), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('favorites-section-tab')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text(closed.title), findsOneWidget);
+    await tester.tap(find.text(closed.title));
+    await tester.pump();
+    expect(find.text('重新激活对话'), findsOneWidget);
+    expect(tester.widget<Scaffold>(find.byType(Scaffold).last).bottomNavigationBar, isNotNull);
+    await tester.tap(find.text('对话'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    opened = [];
+    await tester.pump(const Duration(seconds: 60));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(openLoads, greaterThanOrEqualTo(2));
+    expect(find.text('当前没有远程打开的对话'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('conversation-filter-all')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text(closed.title), findsOneWidget);
+    expect(tester.widget<IconButton>(find.byKey(
+        const ValueKey('conversation-directory-filter'))).onPressed, isNotNull);
+    expect(find.text('加载更早对话'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('open conversation without turns waits for a message instead of running',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const conversation = CodexConversation(
+      id: '01a-empty', cwd: '/project', updatedAt: null, title: '',
+      state: CodexConversationState.notStarted, remoteOpen: true, writerLocked: true,
+    );
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.darkTheme,
+      home: CodexSessionDialog(
+        defaultName: 'codex', defaultWorkDir: '/project',
+        loadConversations: (_) async => const [conversation],
+        loadRemoteOpenConversations: () async => const [conversation],
+        loadRunningConversations: () async => const [],
+        loadRecords: (_) async => const [],
+        loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('conversation-filter-open')));
+    await tester.pumpAndSettle();
+    expect(find.text('等待消息'), findsOneWidget);
+    expect(find.text('远程已打开'), findsOneWidget);
+    expect(find.text('其他端执行中'), findsNothing);
+    expect(find.text('等待远端完成'), findsNothing);
+    expect(find.text('不可恢复'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('conversation-filter-running')));
+    await tester.pumpAndSettle();
+    expect(find.text('对话 01a-empt'), findsNothing);
+    expect(find.text('没有未读的新回复'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('remote open puts nested favorite directories before newer other roots',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    CodexConversation item(String id, String cwd, int day) => CodexConversation(
+      id: id, cwd: cwd, updatedAt: DateTime(2026, 9, day), title: id,
+      remoteOpen: true, state: CodexConversationState.complete,
+    );
+    final conversations = [
+      item('最新的非收藏目录', '/a/other', 30),
+      item('收藏目录的子目录', '/z/favorite/child', 1),
+      item('同根非收藏目录', '/z/other', 20),
+    ];
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.darkTheme,
+      home: CodexSessionDialog(
+        defaultName: 'codex', defaultWorkDir: '/',
+        initialFavoriteDirectories: const {'/z/favorite'},
+        loadConversations: (_) async => conversations,
+        loadRemoteOpenConversations: () async => conversations,
+        loadRecords: (_) async => const [],
+        loadDirectories: (_) async => const RemoteDirectoryListing(path: '/', dirs: []),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('conversation-filter-open')));
+    await tester.pumpAndSettle();
+    expect(tester.getTopLeft(find.text('收藏目录的子目录')).dy,
+        lessThan(tester.getTopLeft(find.text('同根非收藏目录')).dy));
+    expect(tester.getTopLeft(find.byKey(const ValueKey('conversation-directory-/z'))).dy,
+        lessThan(tester.getTopLeft(find.byKey(const ValueKey('conversation-directory-/a/other'))).dy));
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('all conversations load without waiting for the directory',
       (tester) async {
     tester.view.physicalSize = const Size(390, 844);
@@ -197,162 +740,114 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('running filter includes remote tasks and leaves favorites intact',
+  testWidgets('new replies include unfavorited directories despite the history directory filter',
       (tester) async {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
-    await tester.runAsync(() => StorageService.setFavoriteCodexConversations(
-        'filter-running', {'done'}));
-    await tester.runAsync(() => StorageService.markCodexConversationViewed(
-        'filter-running', 'done'));
-    var runningLoads = 0;
-    var running = true;
-    final preloaded = <String>[];
+    final now = DateTime.now();
+    const connection = 'global-new-replies';
+    await tester.runAsync(() async {
+      for (final id in ['favorite-reply', 'other-reply']) {
+        await StorageService.markCodexConversationViewed(connection, id,
+            viewedAt: now.subtract(const Duration(hours: 2)));
+      }
+    });
+    final favorite = CodexConversation(id: 'favorite-reply', cwd: '/favorite',
+        title: '收藏目录的新回复', updatedAt: now, state: CodexConversationState.complete);
+    final other = CodexConversation(id: 'other-reply', cwd: '/other',
+        title: '非收藏目录的新回复', updatedAt: now, state: CodexConversationState.complete);
     await tester.pumpWidget(MaterialApp(home: CodexSessionDialog(
-      connectionId: 'filter-running',
-      defaultName: 'codex', defaultWorkDir: '/project',
-      startWithAllConversations: true,
-      loadConversations: (_) async => const [],
-      loadAllConversations: () async => const [
-        CodexConversation(id: 'done', cwd: '/project', updatedAt: null,
-            title: '已收藏的完成对话', state: CodexConversationState.complete),
-      ],
-      loadRunningConversations: () async {
-        runningLoads++;
-        return running ? const [
-          CodexConversation(id: 'remote-running', cwd: '/project', updatedAt: null,
-              title: '首页之外的运行任务', state: CodexConversationState.running),
-          CodexConversation(id: 'app-running', cwd: '/project', updatedAt: null,
-              title: '本软件的运行任务', state: CodexConversationState.running),
-        ] : const [];
-      },
-      loadOpenedSessions: () async => const [
-        OpenedCodexSession(name: 'codex-app', workDir: '/project',
-            conversationId: 'app-running'),
-      ],
-      loadRunningChatJobs: () async => const {},
-      loadRecords: (id) async { preloaded.add(id); return const []; },
-      loadDirectories: (_) async =>
-          const RemoteDirectoryListing(path: '/project', dirs: []),
+      connectionId: connection, defaultName: 'codex', defaultWorkDir: '/favorite',
+      initialFavoriteDirectories: const {'/favorite'},
+      initialFilteredDirectories: const {'/favorite'},
+      initialFavoriteConversations: const {'favorite-reply'},
+      loadConversations: (_) async => [favorite],
+      loadRunningConversations: () async => [favorite, other],
+      loadRecords: (_) async => const [],
+      loadDirectories: (_) async => const RemoteDirectoryListing(path: '/favorite', dirs: []),
     )));
-    await tester.pump();
-    expect(runningLoads, 1);
-    expect(preloaded, contains('remote-running'));
-    final titleRect = tester.getRect(find.text('远程对话'));
-    for (final key in ['conversation-filter-all', 'conversation-filter-running']) {
-      final filterRect = tester.getRect(find.byKey(ValueKey(key)));
-      expect(filterRect.left, greaterThan(titleRect.right));
-      expect(filterRect.center.dy, closeTo(titleRect.center.dy, 1));
-    }
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const ValueKey('conversation-filter-running')));
-    await tester.pump();
-    expect(find.text('首页之外的运行任务'), findsOneWidget);
-    expect(find.text('其他端执行中'), findsOneWidget);
-    expect(find.text('本软件执行中'), findsOneWidget);
-    expect(find.text('已收藏的完成对话'), findsNothing);
+    await tester.pumpAndSettle();
+    expect(find.text('收藏目录的新回复'), findsOneWidget);
+    expect(find.text('非收藏目录的新回复'), findsOneWidget);
+    expect(tester.widget<IconButton>(find.byKey(
+        const ValueKey('conversation-directory-filter'))).onPressed, isNull);
     await tester.tap(find.byKey(const ValueKey('favorites-section-tab')));
-    await tester.pump();
-    expect(find.text('已收藏的完成对话'), findsOneWidget);
-    expect(find.byKey(const ValueKey('conversation-filter-running')), findsNothing);
-    await tester.tap(find.text('对话'));
-    await tester.pump();
-    running = false;
-    await tester.pump(const Duration(seconds: 15));
-    await tester.pump();
-    expect(find.text('首页之外的运行任务'), findsNothing);
-    expect(find.text('当前没有正在执行或24小时内完成的对话'), findsOneWidget);
-    running = true;
-    await tester.pump(const Duration(seconds: 15));
-    await tester.pump();
-    expect(find.text('首页之外的运行任务'), findsOneWidget);
+    await tester.pumpAndSettle();
+    expect(find.text('收藏目录的新回复'), findsOneWidget);
+    expect(find.text('非收藏目录的新回复'), findsNothing);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('running filter keeps read completions for 24 hours only',
+  testWidgets('new replies exclude imported history and read replies without a 24 hour limit',
       (tester) async {
-    tester.view.physicalSize = const Size(360, 800);
+    tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     final now = DateTime.now();
-    var completion = now.subtract(const Duration(hours: 1));
-    const connectionId = 'recent-results';
-    await tester.runAsync(() => StorageService.markCodexConversationViewed(
-        connectionId, 'already-viewed', viewedAt: now));
-    const running = CodexConversation(id: 'running', cwd: '/p', updatedAt: null,
-        title: '仍在执行', state: CodexConversationState.running);
+    const connection = 'new-replies';
+    await tester.runAsync(() async {
+      await StorageService.markCodexConversationViewed(connection, 'unread',
+          viewedAt: now.subtract(const Duration(days: 4)));
+      await StorageService.markCodexConversationViewed(connection, 'read', viewedAt: now);
+    });
+    final conversations = [
+      CodexConversation(id: 'unread', cwd: '/project', title: '三天前的新回复',
+          updatedAt: now.subtract(const Duration(days: 3)),
+          state: CodexConversationState.complete, remoteOpen: false),
+      CodexConversation(id: 'read', cwd: '/project', title: '已经阅读',
+          updatedAt: now.subtract(const Duration(hours: 1)), state: CodexConversationState.complete),
+      CodexConversation(id: 'imported', cwd: '/project', title: '导入的历史',
+          updatedAt: now, state: CodexConversationState.complete),
+      CodexConversation(id: 'running', cwd: '/project', title: '仍在运行',
+          updatedAt: now, state: CodexConversationState.running),
+    ];
     await tester.pumpWidget(MaterialApp(home: CodexSessionDialog(
-      connectionId: connectionId,
-      defaultName: 'codex', defaultWorkDir: '/p',
-      startWithAllConversations: true,
-      loadConversations: (_) async => const [],
-      loadAllConversations: () async => [
-        CodexConversation(id: 'unread', cwd: '/p', updatedAt: completion,
-            completedAt: completion,
-            title: '电脑端已完成', state: CodexConversationState.complete),
-        CodexConversation(id: 'already-viewed', cwd: '/p', updatedAt: completion,
-            completedAt: completion,
-            title: '已经看过', state: CodexConversationState.complete),
-        CodexConversation(id: 'expired', cwd: '/p', updatedAt: now,
-            completedAt: now.subtract(const Duration(hours: 25)),
-            title: '超过24小时但日志刚更新', state: CodexConversationState.complete),
-        const CodexConversation(id: 'pending-same-dir', cwd: '/p', updatedAt: null,
-            title: '同目录待处理', state: CodexConversationState.pending),
-        const CodexConversation(id: 'aborted-same-dir', cwd: '/p', updatedAt: null,
-            title: '同目录已中止', state: CodexConversationState.aborted),
-        running,
-      ],
-      loadRunningConversations: () async => const [running],
-      loadRecords: (_) async => const [],
-      loadDirectories: (_) async =>
-          const RemoteDirectoryListing(path: '/p', dirs: []),
+      connectionId: connection, defaultName: 'codex', defaultWorkDir: '/project',
+      initialFavoriteConversations: const {'read'},
+      loadConversations: (_) async => conversations,
+      loadRecords: (_) async => [CodexConversationRecord(kind: 'assistant',
+          timestamp: now.subtract(const Duration(days: 3)), text: '回复正文')],
+      loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
     )));
     await tester.pump();
-    expect(tester.getSize(find.text('远程对话')).width, greaterThanOrEqualTo(48));
-    final headingRow = find.ancestor(
-        of: find.text('远程对话'), matching: find.byType(Row)).first;
-    final headingCount = find.descendant(of: headingRow, matching: find.text('6 条'));
-    expect(tester.getRect(headingCount).left -
-        tester.getRect(find.text('远程对话')).right, closeTo(6, 0.1));
-    expect(tester.getRect(find.byKey(const ValueKey('conversation-filter-all'))).left -
-        tester.getRect(headingCount).right, closeTo(4, 0.1));
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(find.byKey(const ValueKey('conversation-filter-running')));
     await tester.pump();
-    expect(find.text('电脑端已完成'), findsOneWidget);
-    expect(find.text('已经看过'), findsOneWidget);
-    expect(find.text('仍在执行'), findsOneWidget);
-    expect(find.text('同目录待处理'), findsNothing);
-    expect(find.text('同目录已中止'), findsNothing);
-    expect(find.text('超过24小时但日志刚更新'), findsNothing);
-    expect(StorageService.getCodexConversationViewedAt(connectionId, 'unread'),
-        isNull, reason: 'Preloading must not mark results read');
-    await tester.tap(find.byKey(const ValueKey('view-conversation-unread')));
-    await tester.pumpAndSettle();
-    await tester.pageBack();
-    await tester.pumpAndSettle();
-    expect(find.text('电脑端已完成'), findsOneWidget);
-    completion = now.subtract(const Duration(hours: 25));
-    await tester.pump(const Duration(seconds: 15));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('三天前的新回复'), findsOneWidget);
+    expect(find.text('已经阅读'), findsNothing);
+    expect(find.text('导入的历史'), findsNothing);
+    expect(find.text('仍在运行'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('favorites-section-tab')));
     await tester.pump();
-    expect(find.text('电脑端已完成'), findsNothing);
-    expect(find.text('已经看过'), findsNothing);
-    expect(find.text('仍在执行'), findsOneWidget);
-    expect(find.text('同目录待处理'), findsNothing);
-    expect(find.text('同目录已中止'), findsNothing);
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('已经阅读'), findsOneWidget);
+    await tester.tap(find.text('对话'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.runAsync(() => StorageService.markCodexConversationViewed(
+        connection, 'unread', viewedAt: now));
+    await tester.tap(find.byKey(const ValueKey('conversation-filter-running')));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('三天前的新回复'), findsNothing);
+    expect(find.text('没有未读的新回复'), findsOneWidget);
     await tester.tap(find.byKey(const ValueKey('conversation-filter-all')));
     await tester.pump();
-    expect(find.text('电脑端已完成'), findsOneWidget);
-    expect(find.text('超过24小时但日志刚更新'), findsOneWidget);
-    expect(find.text('同目录待处理'), findsOneWidget);
-    expect(find.text('同目录已中止'), findsOneWidget);
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(find.text('三天前的新回复'), findsOneWidget);
+    expect(find.text('导入的历史'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('idle text chat appears in the opened list', (tester) async {
+  testWidgets('favorites omit locally opened unfavorited chats', (tester) async {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;
     addTearDown(tester.view.resetPhysicalSize);
@@ -389,14 +884,12 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     await tester.tap(find.byKey(const ValueKey('favorites-section-tab')));
     await tester.pump();
-    expect(find.text('当前打开 · 1 条'), findsOneWidget);
-    expect(find.byKey(const ValueKey('opened-chat-existing-thread')),
-        findsOneWidget);
-    await tester.runAsync(() => tester.tap(
-        find.byKey(const ValueKey('close-opened-chat-existing-thread'))));
-    await tester.pump();
-    expect(find.text('当前打开 · 0 条'), findsOneWidget);
-    expect(StorageService.getOpenedCodexConversations('local-chat'), isEmpty);
+    expect(find.textContaining('当前打开'), findsNothing);
+    expect(find.byKey(const ValueKey('opened-chat-existing-thread')), findsNothing);
+    expect(find.text('之前打开的文字对话'), findsNothing);
+    expect(StorageService.getOpenedCodexConversations('local-chat'),
+        {'existing-thread'});
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('Codex session dialog lays out conversation history',
@@ -515,6 +1008,62 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  for (final current in ['/b', '/other']) {
+    testWidgets('new conversation defaults to a favorite from $current', (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      await tester.pumpWidget(MaterialApp(
+        theme: AppTheme.darkTheme,
+        home: CodexSessionDialog(
+          defaultName: 'codex', defaultWorkDir: current,
+          initialFavoriteDirectories: const {'/a', '/b'},
+          loadConversations: (_) async => const [],
+          loadRecords: (_) async => const [],
+          loadDirectories: (path) async => RemoteDirectoryListing(path: path, dirs: []),
+        ),
+      ));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('新建对话'));
+      await tester.pumpAndSettle();
+      expect(find.text('先选目录，进入聊天后发送首条消息时启动远程 Codex'), findsOneWidget);
+      final expected = current == '/b' ? '/b' : '/a';
+      expect(tester.widget<ChoiceChip>(find.byKey(
+          ValueKey('new-directory-favorite-$expected'))).selected, isTrue);
+      expect(
+        find.descendant(
+          of: find.byKey(const ValueKey('new-conversation-selected-directory')),
+          matching: find.text(expected),
+        ),
+        findsOneWidget,
+      );
+      expect(find.widgetWithText(RadioListTile<bool>, '终端'), findsNothing);
+      await tester.tap(find.text('更多选项'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(RadioListTile<bool>, '文字聊天'), findsOneWidget);
+      expect(tester.widget<RadioListTile<bool>>(
+          find.byKey(const ValueKey('new-conversation-mode-chat'))).groupValue,
+          isTrue);
+      await tester.tap(find.byKey(const ValueKey('new-conversation-mode-terminal')));
+      await tester.pumpAndSettle();
+      expect(tester.widget<RadioListTile<bool>>(
+          find.byKey(const ValueKey('new-conversation-mode-terminal'))).groupValue,
+          isFalse);
+      await tester.tap(find.text('更多选项'));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const ValueKey('new-conversation-directory')),
+          findsNothing);
+      final other = expected == '/a' ? '/b' : '/a';
+      await tester.tap(find.byKey(ValueKey('new-directory-favorite-$other')));
+      await tester.pumpAndSettle();
+      expect(find.text(other), findsWidgets);
+      expect(tester.widget<ChoiceChip>(find.byKey(
+          ValueKey('new-directory-favorite-$other'))).selected, isTrue);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
+
   testWidgets('new conversation picks a remote directory and favorite default',
       (tester) async {
     tester.view.physicalSize = const Size(390, 844);
@@ -522,6 +1071,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     CodexSessionConfig? selected;
+    Set<String>? savedDirectories;
     await tester.pumpWidget(MaterialApp(
       theme: AppTheme.darkTheme,
       home: Scaffold(
@@ -532,6 +1082,7 @@ void main() {
                     context: context,
                     builder: (_) => CodexSessionDialog(
                       defaultName: 'codex',
+                      saveFavoriteDirectories: (_, paths) async { savedDirectories = paths; },
                       defaultWorkDir: '/project',
                       loadConversations: (_) async => const [],
                       loadRecords: (_) async => const [],
@@ -549,6 +1100,8 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('新建对话'));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('选择其他目录'));
+    await tester.pumpAndSettle();
     expect(
       tester
           .widget<CheckboxListTile>(
@@ -561,10 +1114,18 @@ void main() {
     await tester.tap(find.text('选择此目录'));
     await tester.pump();
     expect(find.text('/project/child'), findsWidgets);
-    await tester.tap(find.widgetWithText(FilledButton, '创建'));
+    await tester.tap(find.text('更多选项'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('new-conversation-mode-terminal')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('更多选项'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.widgetWithText(FilledButton, '打开终端'));
     await tester.pumpAndSettle();
     expect(selected?.workDir, '/project/child');
+    expect(selected?.openAsChat, isFalse);
     expect(selected?.favoriteOnCreate, isTrue);
+    expect(savedDirectories, contains('/project/child'));
   });
 
   testWidgets('loads completed conversations once without a refresh control',
@@ -662,7 +1223,9 @@ void main() {
     await tester.tap(find.text('后台任务'));
     await tester.pump();
 
-    await tester.pump(const Duration(seconds: 15));
+    await tester.pump(const Duration(seconds: 4));
+    expect(loadCount, 1);
+    await tester.pump(const Duration(seconds: 1));
     expect(loadCount, 2);
     expect(find.text('后台任务'), findsOneWidget);
     expect(find.descendant(
@@ -670,12 +1233,22 @@ void main() {
         matching: find.text('正在执行')), findsOneWidget);
     expect(find.byType(CircularProgressIndicator), findsNothing);
 
-    refreshed.complete([conversation(CodexConversationState.complete)]);
+    refreshed.complete([
+      conversation(CodexConversationState.complete),
+      CodexConversation(
+        id: 'new-remote-thread',
+        cwd: '/project',
+        updatedAt: DateTime(2026, 9, 24),
+        title: '远程新启动的任务',
+        state: CodexConversationState.running,
+      ),
+    ]);
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     expect(find.text('已完成'), findsOneWidget);
     expect(find.text('后台任务'), findsOneWidget);
-    await tester.pump(const Duration(seconds: 15));
+    expect(find.text('远程新启动的任务'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 5));
     expect(loadCount, 3);
     expect(tester.takeException(), isNull);
   });
@@ -758,9 +1331,8 @@ void main() {
 
     await tester.tap(find.byKey(const ValueKey('favorites-section-tab')));
     await tester.pump();
-    expect(find.text('当前打开 · 1 条'), findsOneWidget);
-    expect(find.byKey(const ValueKey('opened-chat-app-thread')),
-        findsOneWidget);
+    expect(find.textContaining('当前打开'), findsNothing);
+    expect(find.byKey(const ValueKey('opened-chat-app-thread')), findsNothing);
     await tester.tap(find.text('对话'));
     await tester.pump();
 
@@ -1755,7 +2327,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets('text chat selection keeps the chosen conversation id',
+  testWidgets('reactivating a closed conversation keeps its id and directory',
       (tester) async {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;
@@ -1780,9 +2352,14 @@ void main() {
                       cwd: '/home/qwer/project',
                       updatedAt: DateTime(2026, 9, 23),
                       title: '原来的对话',
+                      remoteOpen: false,
                       state: CodexConversationState.complete,
                     ),
                   ],
+                  loadOpenedSessions: () async => const [OpenedCodexSession(
+                    name: 'codex-old-shell', workDir: '/home/qwer/project',
+                    conversationId: 'thread-123',
+                  )],
                   loadRecords: (_) async => const [],
                   loadDirectories: (_) async => const RemoteDirectoryListing(
                     path: '/home/qwer',
@@ -1808,9 +2385,12 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.widgetWithText(CheckedPopupMenuItem<bool>, '文字聊天'));
     await tester.pump();
-    await tester.tap(find.widgetWithText(FilledButton, '继续对话'));
+    await tester.tap(find.widgetWithText(FilledButton, '重新激活对话'));
     await tester.pump();
     expect(selected?.openAsChat, isTrue);
+    expect(selected?.openSessionName, isNull);
+    expect(selected?.launch, CodexConversationLaunch.resume);
+    expect(selected?.stopWriterBeforeLaunch, isFalse);
     expect(selected?.resumeConversation?.id, 'thread-123');
     expect(selected?.effectiveWorkDir, '/home/qwer/project');
   });
@@ -1930,6 +2510,7 @@ void main() {
                       cwd: '/home/qwer',
                       updatedAt: DateTime(2026, 9, 23),
                       title: '已经打开的任务',
+                      remoteOpen: true,
                       state: CodexConversationState.running,
                     ),
                   ],
@@ -1963,11 +2544,12 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
 
     expect(find.text('已经打开的任务'), findsWidgets);
-    expect(find.text('已打开'), findsWidgets);
+    expect(find.text('远程已打开'), findsWidgets);
     expect(
         find.byKey(const ValueKey('hide-opened-conversations')), findsNothing);
     await tester.tap(find.byKey(const ValueKey('codex-open-mode')));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(find.widgetWithText(CheckedPopupMenuItem<bool>, '文字聊天'));
     await tester.pump();
     await tester.tap(find.text('已经打开的任务'));
@@ -1976,20 +2558,18 @@ void main() {
         find.byKey(const ValueKey('favorite-conversation-conversation-123456')),
         findsNothing);
     await tester.tap(find.byKey(const ValueKey('mobile-conversation-more')));
-    await tester.pumpAndSettle();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.tap(find.widgetWithText(PopupMenuItem<String>, '收藏对话'));
     await tester.pump();
     await tester.tap(find.byKey(const ValueKey('favorites-section-tab')));
     await tester.pump();
-    expect(find.textContaining('当前打开'), findsOneWidget);
-    expect(find.byKey(const ValueKey('opened-session-codex-conversat')),
-        findsOneWidget);
-    expect(find.byKey(const ValueKey('opened-session-codex-abcdef12')),
-        findsOneWidget);
+    expect(find.textContaining('当前打开'), findsNothing);
+    expect(find.byKey(const ValueKey('opened-session-codex-conversat')), findsNothing);
+    expect(find.byKey(const ValueKey('opened-session-codex-abcdef12')), findsNothing);
     expect(find.text('已经打开的任务'), findsWidgets);
     expect(find.text('收藏的对话'), findsOneWidget);
-    await tester
-        .tap(find.byKey(const ValueKey('opened-session-codex-conversat')));
+    await tester.tap(find.text('已经打开的任务'));
     await tester.pump();
     await tester.tap(find.widgetWithText(FilledButton, '继续对话'));
     await tester.pump();
@@ -2000,7 +2580,7 @@ void main() {
     expect(selected?.openedSessionTitles['codex-abcdef12'], 'Codex 对话');
   });
 
-  testWidgets('unmatched opened terminal still honors global chat mode',
+  testWidgets('favorites omit unmatched opened terminals',
       (tester) async {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;
@@ -2043,9 +2623,9 @@ void main() {
     await tester.pump(const Duration(milliseconds: 100));
     await tester.tap(find.byKey(const ValueKey('favorites-section-tab')));
     await tester.pump();
-    await tester.tap(find.byKey(const ValueKey('opened-session-codex-1')));
-    await tester.pump();
-    expect(selected?.openAsChat, isTrue);
-    expect(selected?.openSessionName, 'codex-1');
+    expect(find.textContaining('当前打开'), findsNothing);
+    expect(find.byKey(const ValueKey('opened-session-codex-1')), findsNothing);
+    expect(selected, isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 }
