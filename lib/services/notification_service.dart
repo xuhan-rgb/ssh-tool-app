@@ -37,6 +37,7 @@ class NotificationService {
 
   static final ValueNotifier<int> historyRevision = ValueNotifier<int>(0);
   static Future<void> _noticeWrite = Future.value();
+  static final Set<String> _failedCodexAlerts = {};
 
   /// 通知点击回调 — 外部设置，用于跳转到对应 Tab
   /// payload 格式: "connectionId:sessionName"
@@ -180,39 +181,58 @@ class NotificationService {
   static Future<void> showCodexFinished(
       String connectionId, String threadId, String jobId,
       {String? title}) async {
-    await recordCodexFinished(connectionId, threadId, jobId, title: title);
+    final isNew = await _recordCodexFinished(
+        connectionId, threadId, jobId, title: title);
+    final id = '$connectionId:$jobId';
+    final retry = _failedCodexAlerts.remove(id);
+    if (!isNew && !retry) return;
     if (!_isSupportedPlatform) return;
-    await _plugin.show(
-      'codex:$connectionId:$jobId'.hashCode,
-      '${CodexCompletionNotice.formatTitle(threadId, title)} · 已完成',
-      '点击查看回复',
-      const NotificationDetails(
-        android: AndroidNotificationDetails(
-          'claude_activity',
-          'Claude 活动',
-          importance: Importance.defaultImportance,
-          priority: Priority.defaultPriority,
-          onlyAlertOnce: true,
+    try {
+      await _plugin.show(
+        'codex:$connectionId:$jobId'.hashCode,
+        '${CodexCompletionNotice.formatTitle(threadId, title)} · 已完成',
+        '点击查看回复',
+        const NotificationDetails(
+          android: AndroidNotificationDetails(
+            'claude_activity',
+            'Claude 活动',
+            importance: Importance.defaultImportance,
+            priority: Priority.defaultPriority,
+            onlyAlertOnce: true,
+          ),
+          macOS: DarwinNotificationDetails(),
         ),
-        macOS: DarwinNotificationDetails(),
-      ),
-      payload: '$codexPayloadPrefix$connectionId|$threadId|$jobId',
-    );
+        payload: '$codexPayloadPrefix$connectionId|$threadId|$jobId',
+      );
+    } catch (_) {
+      _failedCodexAlerts.add(id);
+      rethrow;
+    }
   }
 
   static Future<void> recordCodexFinished(
+      String connectionId, String threadId, String jobId, {String? title}) async {
+    await _recordCodexFinished(connectionId, threadId, jobId, title: title);
+  }
+
+  static Future<bool> _recordCodexFinished(
       String connectionId, String threadId, String jobId, {String? title}) {
-    _noticeWrite = _noticeWrite.catchError((_) {}).then((_) async {
+    final write = _noticeWrite.catchError((_) {}).then((_) async {
+      final id = '$connectionId:$jobId';
+      final exists = StorageService.getCodexCompletionNotices()
+          .any((notice) => notice.id == id);
       await StorageService.saveCodexCompletionNotice(CodexCompletionNotice(
-        id: '$connectionId:$jobId',
+        id: id,
         connectionId: connectionId,
         threadId: threadId,
         title: title,
         completedAt: DateTime.now(),
       ));
       historyRevision.value++;
+      return !exists;
     });
-    return _noticeWrite;
+    _noticeWrite = write.then((_) {});
+    return write;
   }
 
   static Future<void> markCodexRead(String id) async {

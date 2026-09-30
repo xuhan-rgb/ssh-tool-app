@@ -15,6 +15,7 @@ import '../services/storage_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/chat_markdown.dart';
 import '../widgets/codex_goal_card.dart';
+import '../widgets/codex_model_picker.dart';
 import 'remote_html_preview_screen.dart';
 import 'remote_file_preview_screen.dart';
 
@@ -25,6 +26,8 @@ class CodexChatScreen extends StatefulWidget {
   final String? runningJobId;
   final bool favoriteOnCreate;
   final bool forkOnFirstSend;
+  final List<CodexConversationRecord> clearedContextRecords;
+  final (String, String)? initialModel;
   final Future<CodexChatResult> Function(String prompt)? sendMessage;
   final Future<void> Function(String threadId)? onConversationCreated;
   final Future<CodexChatResult> Function(String jobId)? watchRunningJob;
@@ -40,6 +43,8 @@ class CodexChatScreen extends StatefulWidget {
     this.runningJobId,
     this.favoriteOnCreate = false,
     this.forkOnFirstSend = false,
+    this.clearedContextRecords = const [],
+    this.initialModel,
     this.sendMessage,
     this.onConversationCreated,
     this.watchRunningJob,
@@ -180,7 +185,22 @@ class _CodexChatScreenState extends State<CodexChatScreen>
     _keyboardInset = WidgetsBinding
             .instance.platformDispatcher.views.firstOrNull?.viewInsets.bottom ??
         0;
+    if (widget.initialModel != null) {
+      _model = widget.initialModel!.$1;
+      _effort = widget.initialModel!.$2;
+    }
     _threadId = widget.conversation?.id;
+    if (widget.clearedContextRecords.isNotEmpty) {
+      _contextCleared = true;
+      _archivedRecords = [...widget.clearedContextRecords,
+        CodexConversationRecord(kind: 'context_clear', timestamp: DateTime.now(),
+            text: '上下文已清空 · 后续消息将作为新对话')];
+      _records = _archivedRecords;
+    }
+    if (_threadId != null) {
+      final selection = StorageService.getCodexConversationModel(widget.connection.id, _threadId!);
+      if (selection != null) { _model = selection.$1; _effort = selection.$2; }
+    }
     if (_threadId != null) {
       _records = (CodexSessionService.cachedRecords(
                   widget.connection.id, _threadId!) ?? const [])
@@ -341,6 +361,16 @@ class _CodexChatScreenState extends State<CodexChatScreen>
     }
   }
 
+  Future<void> _changeModel() async {
+    final selection = await chooseCodexModel(context, _models,
+        currentModel: _model, currentEffort: _effort);
+    if (selection == null || !mounted) return;
+    setState(() { _model = selection.$1; _effort = selection.$2; });
+    if (_threadId != null) {
+      await StorageService.setCodexConversationModel(widget.connection.id, _threadId!, selection);
+    }
+  }
+
   Future<void> _chooseModel(String modelId) async {
     final model = _models.where((item) => item.id == modelId).firstOrNull;
     if (model == null || _sending) return;
@@ -390,6 +420,10 @@ class _CodexChatScreenState extends State<CodexChatScreen>
         _model = model.id;
         _effort = selected;
       });
+      if (_threadId != null) {
+        await StorageService.setCodexConversationModel(
+            widget.connection.id, _threadId!, (_model, _effort));
+      }
     }
   }
 
@@ -598,6 +632,8 @@ class _CodexChatScreenState extends State<CodexChatScreen>
             onActivity: _updateActivity,
             onStartedAt: _setTurnStartedAt,
           ));
+      unawaited(StorageService.setCodexConversationModel(
+          _detachedConnectionId, result.threadId, (_model, _effort)));
       unawaited(StorageService.addOpenedCodexConversation(
           _detachedConnectionId, result.threadId));
       if (mounted) {
@@ -994,6 +1030,10 @@ class _CodexChatScreenState extends State<CodexChatScreen>
               onCanceled: _finishTopMenu,
               onSelected: (value) {
                 _finishTopMenu();
+                if (value == 'model') {
+                  unawaited(_changeModel());
+                  return;
+                }
                 if (value == 'clear') {
                   _requestClearContext();
                   return;
@@ -1026,6 +1066,8 @@ class _CodexChatScreenState extends State<CodexChatScreen>
                   child: const Text('显示 Token 用量'),
                 ),
                 const PopupMenuDivider(),
+                PopupMenuItem(value: 'model', enabled: !_sending && _models.isNotEmpty,
+                    child: const Text('更改模型')),
                 PopupMenuItem(
                   value: 'clear',
                   enabled: !_clearPending,

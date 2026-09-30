@@ -113,13 +113,13 @@ void main() {
       ],
     )));
     await tester.pumpAndSettle();
-    expect(find.text('最近一轮 · 模型：gpt-6 · 思考强度：高（high）'), findsOneWidget);
+    expect(find.text('模型：gpt-6 · 思考强度：高（high）'), findsOneWidget);
     await tester.tap(find.byTooltip('刷新记录'));
     await tester.pumpAndSettle();
-    expect(find.text('最近一轮 · 模型：gpt-6-mini · 思考强度：低（low）'), findsOneWidget);
+    expect(find.text('模型：gpt-6-mini · 思考强度：低（low）'), findsOneWidget);
     await tester.tap(find.byTooltip('刷新记录'));
     await tester.pumpAndSettle();
-    expect(find.text('最近一轮 · 模型：未知 · 思考强度：未知'), findsOneWidget);
+    expect(find.text('模型：未知 · 思考强度：未知'), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 }

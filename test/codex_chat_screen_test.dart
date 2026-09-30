@@ -9,6 +9,7 @@ import 'package:ssh_tool_app/screens/codex_chat_screen.dart';
 import 'package:ssh_tool_app/services/codex_chat_service.dart';
 import 'package:ssh_tool_app/services/codex_session_service.dart';
 import 'package:ssh_tool_app/services/storage_service.dart';
+import 'package:ssh_tool_app/services/notification_service.dart';
 
 void main() {
   late Directory settingsDirectory;
@@ -18,6 +19,54 @@ void main() {
     await Hive.openBox('settings');
   });
   tearDownAll(() async => settingsDirectory.delete(recursive: true));
+
+  testWidgets('completion in background stays unread until the conversation resumes', (tester) async {
+    final result = Completer<CodexChatResult>();
+    var started = false;
+    final now = DateTime.now();
+    addTearDown(() {
+      if (tester.binding.lifecycleState == AppLifecycleState.paused) {
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+      }
+      if (tester.binding.lifecycleState == AppLifecycleState.hidden) {
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+      }
+      if (tester.binding.lifecycleState != AppLifecycleState.resumed) {
+        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+      }
+      NotificationService.isAppInForeground = true;
+    });
+    await tester.pumpWidget(MaterialApp(home: CodexChatScreen(
+      connection: SshConnection(id: 'background-read', name: 'test', host: 'localhost',
+        username: 'test', createdAt: now, updatedAt: now),
+      workDir: '/project', sendMessage: (_) { started = true; return result.future; },
+    )));
+    await tester.enterText(find.byKey(const ValueKey('chat-input')), '隔离测试');
+    await tester.tap(find.byKey(const ValueKey('chat-send')));
+    await tester.pump();
+    expect(started, isTrue);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+    NotificationService.isAppInForeground = false;
+    await tester.runAsync(() => NotificationService.recordCodexFinished(
+        'background-read', 'background-thread', 'background-job'));
+    result.complete(const CodexChatResult(threadId: 'background-thread', answer: '完成'));
+    await tester.pump();
+    await tester.runAsync(() async => Future<void>.delayed(const Duration(milliseconds: 100)));
+    await tester.pump();
+    bool isRead() => StorageService.getCodexCompletionNotices()
+        .firstWhere((notice) => notice.id == 'background-read:background-job').read;
+    expect(isRead(), isFalse);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    NotificationService.isAppInForeground = true;
+    await tester.pump();
+    await tester.runAsync(() async => Future<void>.delayed(const Duration(milliseconds: 100)));
+    expect(isRead(), isTrue);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 
   testWidgets(
       'draft and completed chat show remote session state and can close',

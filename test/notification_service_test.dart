@@ -142,6 +142,72 @@ void main() {
     }
   });
 
+  test('repeated and concurrent completion delivery alerts only once per job', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    final calls = <MethodCall>[];
+    const channel = MethodChannel('dexterous.com/flutter/local_notifications');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      calls.add(call);
+      return call.method == 'initialize' ? true : null;
+    });
+    try {
+      AndroidFlutterLocalNotificationsPlugin.registerWith();
+      await FlutterLocalNotificationsPlugin().initialize(
+        const InitializationSettings(
+          android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        ),
+      );
+      await Future.wait([
+        NotificationService.showCodexFinished('dedupe', 'thread', 'job-a'),
+        NotificationService.showCodexFinished('dedupe', 'thread', 'job-a'),
+      ]);
+      expect(calls.where((call) => call.method == 'show').length, 1);
+      await NotificationService.markCodexRead('dedupe:job-a');
+      await NotificationService.showCodexFinished('dedupe', 'thread', 'job-a');
+      expect(calls.where((call) => call.method == 'show').length, 1);
+      expect(StorageService.getCodexCompletionNotices()
+          .firstWhere((notice) => notice.id == 'dedupe:job-a').read, isTrue);
+      await NotificationService.showCodexFinished('dedupe', 'thread', 'job-b');
+      expect(calls.where((call) => call.method == 'show').length, 2);
+    } finally {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
+  test('notification delivery failure can retry without losing completion history', () async {
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    var attempts = 0;
+    const channel = MethodChannel('dexterous.com/flutter/local_notifications');
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(channel, (call) async {
+      if (call.method == 'show' && ++attempts == 1) {
+        throw PlatformException(code: 'temporary-notification-error');
+      }
+      return call.method == 'initialize' ? true : null;
+    });
+    try {
+      AndroidFlutterLocalNotificationsPlugin.registerWith();
+      await FlutterLocalNotificationsPlugin().initialize(
+        const InitializationSettings(
+          android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        ),
+      );
+      await expectLater(NotificationService.showCodexFinished(
+          'retry-notice', 'thread', 'job'), throwsA(isA<PlatformException>()));
+      await NotificationService.showCodexFinished('retry-notice', 'thread', 'job');
+      expect(attempts, 2);
+      expect(StorageService.getCodexCompletionNotices()
+          .where((notice) => notice.id == 'retry-notice:job'), hasLength(1));
+    } finally {
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(channel, null);
+      debugDefaultTargetPlatformOverride = null;
+    }
+  });
+
   test('Codex completion notification routes to the exact conversation', () {
     final target = NotificationService.parseCodexPayload(
       'codex|connection-1|thread-123',

@@ -24,6 +24,7 @@ import '../widgets/history_panel.dart';
 import '../widgets/chat_markdown.dart';
 import '../widgets/codex_terminal_record.dart';
 import '../widgets/codex_goal_card.dart';
+import '../widgets/codex_model_picker.dart';
 import 'codex_chat_screen.dart';
 import 'remote_file_preview_screen.dart';
 import 'codex_notification_history_screen.dart';
@@ -3158,6 +3159,8 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
 class CodexConversationViewerDialog extends StatefulWidget {
   final String connectionId;
   final bool isClaude;
+  final Future<List<CodexModel>> Function()? loadModels;
+
   final CodexConversation conversation;
   final Future<CodexMessageRoute> Function(String message)? sendMessage;
   final Future<List<CodexConversationRecord>> Function(String conversationId)
@@ -3165,6 +3168,7 @@ class CodexConversationViewerDialog extends StatefulWidget {
 
   const CodexConversationViewerDialog({
     this.connectionId = '',
+    this.loadModels,
     this.isClaude = false,
     this.sendMessage,
     required this.conversation,
@@ -3179,6 +3183,8 @@ class CodexConversationViewerDialog extends StatefulWidget {
 class _CodexConversationViewerDialogState
     extends State<CodexConversationViewerDialog> {
   List<CodexConversationRecord> _records = const [];
+  (String, String)? _selectedModel;
+  bool _loadingModels = false;
   Timer? _refreshTimer;
   Duration? _refreshInterval;
   CodexConversationState? _observedState;
@@ -3304,6 +3310,38 @@ class _CodexConversationViewerDialogState
     });
   }
 
+  Future<void> _changeRemoteModel() async {
+    setState(() { _loadingModels = true; _sendError = null; });
+    try {
+      final models = await (widget.loadModels?.call() ?? CodexChatService.listModels(widget.connectionId));
+      if (!mounted) return;
+      if (models.isEmpty) throw StateError('远程没有可用模型');
+      final selection = await chooseCodexModel(context, models,
+          currentModel: _selectedModel?.$1 ?? _records.lastOrNull?.model,
+          currentEffort: _selectedModel?.$2 ?? _records.lastOrNull?.reasoningEffort);
+      if (selection == null || !mounted) return;
+      setState(() => _selectedModel = selection);
+      await StorageService.setCodexConversationModel(widget.connectionId, widget.conversation.id, selection);
+    } catch (error) {
+      if (mounted) setState(() => _sendError = '更改模型失败：$error');
+    } finally {
+      if (mounted) setState(() => _loadingModels = false);
+    }
+  }
+
+  void _clearRemoteContext() {
+    final connection = StorageService.getConnection(widget.connectionId);
+    if (connection == null) {
+      setState(() => _sendError = '连接配置不存在，无法创建新上下文');
+      return;
+    }
+    Navigator.of(context).pushReplacement(MaterialPageRoute<void>(
+      builder: (_) => CodexChatScreen(connection: connection,
+          workDir: widget.conversation.cwd, clearedContextRecords: _records,
+          initialModel: _selectedModel),
+    ));
+  }
+
   Future<void> _sendRemoteMessage() async {
     final message = _messageController.text;
     if (_sendingMessage || message.trim().isEmpty) return;
@@ -3320,8 +3358,11 @@ class _CodexConversationViewerDialogState
     });
     try {
       final route = await (widget.sendMessage?.call(message) ??
-          CodexSessionService.sendMessage(
-              widget.connectionId, widget.conversation.id, message));
+          (_selectedModel == null
+              ? CodexSessionService.sendMessage(widget.connectionId, widget.conversation.id, message)
+              : CodexSessionService.sendMessageWithModel(widget.connectionId,
+                  widget.conversation.id, message, _selectedModel!.$1, _selectedModel!.$2,
+                  workDir: widget.conversation.cwd)));
       // 发送完成时窗口可能已关闭；仍需让重开的窗口收到队列状态。
       _pendingMessages.markQueued(pending, route: route);
       if (!mounted) return;
@@ -3339,6 +3380,7 @@ class _CodexConversationViewerDialogState
   void initState() {
     super.initState();
     _logLevel = StorageService.getCodexViewerLogLevel();
+    _selectedModel = StorageService.getCodexConversationModel(widget.connectionId, widget.conversation.id);
     _records = widget.isClaude ? const [] : CodexSessionService.cachedRecords(
             widget.connectionId, widget.conversation.id) ??
         const [];
@@ -3559,7 +3601,7 @@ class _CodexConversationViewerDialogState
   }
 
   String get _reasoningEffortLabel {
-    final effort = _records.isEmpty ? null : _records.last.reasoningEffort;
+    final effort = _selectedModel?.$2 ?? _records.lastOrNull?.reasoningEffort;
     return switch (effort) {
       null || '' => '未知',
       'none' => '无（none）',
@@ -3647,6 +3689,20 @@ class _CodexConversationViewerDialogState
                 ),
               ),
             ),
+            if (!widget.isClaude)
+              PopupMenuButton<String>(
+                key: const ValueKey('viewer-conversation-options'),
+                tooltip: '对话操作',
+                enabled: !_sendingMessage && !_loadingModels && !widget.conversation.isSubagent,
+                onSelected: (value) {
+                  if (value == 'model') unawaited(_changeRemoteModel());
+                  if (value == 'clear') _clearRemoteContext();
+                },
+                itemBuilder: (_) => const [
+                  PopupMenuItem(value: 'clear', child: Text('清空上下文')),
+                  PopupMenuItem(value: 'model', child: Text('更改模型')),
+                ],
+              ),
             DropdownButton<String>(
               key: const ValueKey('viewer-log-toggle'),
               value: _logLevel,
@@ -3665,7 +3721,8 @@ class _CodexConversationViewerDialogState
           ],
         ),
         Text(
-          '最近一轮 · 模型：${_records.isEmpty || _records.last.model == null || _records.last.model!.isEmpty ? '未知' : _records.last.model} · 思考强度：$_reasoningEffortLabel',
+          '模型：${_selectedModel?.$1 ?? (_records.lastOrNull?.model?.isNotEmpty == true ? _records.last.model : '未知')} · 思考强度：$_reasoningEffortLabel'
+          '${_selectedModel != null && (_selectedModel!.$1 != _records.lastOrNull?.model || _selectedModel!.$2 != _records.lastOrNull?.reasoningEffort) ? ' · 下次发送生效' : ''}',
           key: const ValueKey('viewer-reasoning-effort'),
           style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
         ),
@@ -3730,7 +3787,8 @@ class _CodexConversationViewerDialogState
                                 sendStatus: !message.queued ? '发送中…'
                                     : message.route == CodexMessageRoute.steer
                                         ? '已提交 Steer · 等待 Codex 接收'
-                                        : '已发送到远程队列',
+                                        : message.route == CodexMessageRoute.start
+                                            ? '已提交远程执行' : '已发送到远程队列',
                               );
                             }
                             final record = visibleRecords[

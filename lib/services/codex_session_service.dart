@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 
 import '../models/codex_goal.dart';
 import 'ssh_service.dart';
+import 'codex_chat_service.dart';
 import 'remote_state_service.dart';
 import 'storage_service.dart';
 import 'conversation_sync.dart';
@@ -264,7 +265,7 @@ class CodexConversationParser {
   }
 }
 
-enum CodexMessageRoute { steer, queue }
+enum CodexMessageRoute { steer, queue, start }
 
 class CodexPendingMessage {
   final String text;
@@ -418,6 +419,60 @@ class CodexSessionService {
     await queueMessage(connectionId, conversationId, message);
     return CodexMessageRoute.queue;
   }
+
+  static Future<CodexMessageRoute> sendMessageWithModel(String connectionId,
+      String conversationId, String message, String model, String effort,
+      {required String workDir}) async {
+    if ([conversationId, message, model, effort].any((value) => value.trim().isEmpty)) {
+      throw ArgumentError('对话、消息、模型和思考级别不能为空');
+    }
+    final source = await rootBundle.loadString('assets/codex_steer_message.py');
+    final script = '${source.split('\ndef steer(').first}\n$_sendWithModelScript';
+    final output = await _runPython(connectionId, script,
+        [conversationId, message, model, effort, workDir], allowReconnect: false);
+    if (output.trim().isNotEmpty) {
+      final jobId = (jsonDecode(output) as Map<String, dynamic>)['jobId'] as String?;
+      if (jobId != null) {
+        await CodexChatService.watchJob(connectionId: connectionId, jobId: jobId);
+      }
+    }
+    return CodexMessageRoute.start;
+  }
+
+  static const _sendWithModelScript = r'''thread_id, message, model, effort, work_dir = sys.argv[1:6]
+# Phone-owned sessions retain a dedicated worker; submit through that owner.
+worker_path = Path.home() / '.ssh_tool/codex_chat_worker.py'
+if worker_path.is_file():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location('chat_worker', worker_path)
+    worker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(worker)
+    status = worker.session_info(thread_id)
+    if status['open']:
+        if status['busy']:
+            raise RuntimeError('当前任务仍在执行，请结束后发送，所选模型将在下一轮生效')
+        request = {'jobId': uuid.uuid4().hex, 'threadId': thread_id, 'prompt': message,
+            'title': message, 'model': model, 'effort': effort, 'workDir': work_dir}
+        worker.start(base64.b64encode(json.dumps(request).encode()).decode())
+        sys.exit(0)
+rpc = RpcConnection(Path(os.environ.get('CODEX_HOME', '~/.codex')).expanduser() / 'app-server-control/app-server-control.sock')
+try:
+    rpc.request('initialize', {'clientInfo': {'name': 'ssh_tool_model', 'version': '1'}, 'capabilities': {'experimentalApi': True}})
+    rpc.send({'method': 'initialized', 'params': {}})
+    thread = rpc.request('thread/read', {'threadId': thread_id, 'includeTurns': False})['thread']
+    if thread.get('canAcceptDirectInput') is False:
+        raise RuntimeError('目标对话不接受直接输入，本次未发送')
+    if thread['status']['type'] == 'active':
+        raise RuntimeError('当前任务仍在执行，请结束后发送，所选模型将在下一轮生效')
+    if thread['status']['type'] not in ('idle', 'notLoaded'):
+        raise RuntimeError('无法确认远程对话状态，本次未发送')
+    if thread['status']['type'] == 'notLoaded':
+        rpc.request('thread/resume', {'threadId': thread_id, 'excludeTurns': True})
+    rpc.request('turn/start', {'threadId': thread_id,
+        'input': [{'type': 'text', 'text': message}], 'model': model, 'effort': effort})
+finally:
+    rpc.close()
+''';
 
   static Future<void> steerMessage(
     String connectionId,

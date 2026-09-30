@@ -150,7 +150,7 @@ class StorageService {
     }
     final viewedPrefix = _codexConversationViewedPrefix(id);
     await _settingsBox.deleteAll(_settingsBox.keys
-        .where((key) => key is String && key.startsWith(viewedPrefix))
+        .where((key) => key is String && (key.startsWith(viewedPrefix) || key.startsWith('codex_model_${id}_')))
         .toList());
     final notices = getCodexCompletionNotices()
         .where((notice) => notice.connectionId != id)
@@ -355,6 +355,23 @@ class StorageService {
     notices[index] = notices[index].markRead();
     await _writeCodexCompletionNotices(
         _retainedCodexCompletionNotices(notices, timestamp));
+  }
+
+  static (String, String)? getCodexConversationModel(String connectionId, String threadId) {
+    if (!Hive.isBoxOpen(_settingsBoxName)) return null;
+    final value = _settingsBox.get('codex_model_${connectionId}_$threadId');
+    if (value is! List || value.length != 2 || value.any((item) => item is! String)) return null;
+    return (value[0] as String, value[1] as String);
+  }
+
+  static Future<void> setCodexConversationModel(String connectionId, String threadId,
+      (String, String)? selection) async {
+    final key = 'codex_model_${connectionId}_$threadId';
+    if (selection == null) {
+      await _settingsBox.delete(key);
+    } else {
+      await _settingsBox.put(key, [selection.$1, selection.$2]);
+    }
   }
 
   static String _claudeEnvKey(String connectionId) =>
