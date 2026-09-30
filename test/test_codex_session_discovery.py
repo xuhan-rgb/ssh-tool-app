@@ -19,6 +19,62 @@ SCRIPT = re.search(r"static const String _listScript = r'''(.*?)''';", SOURCE, r
 
 
 class CodexSessionDiscoveryTest(unittest.TestCase):
+    def test_shared_daemon_completed_turn_overrides_stale_running_log(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / 'sessions').mkdir()
+            locks = home / 'thread-writer-locks'
+            locks.mkdir()
+            thread_id = str(uuid.UUID(int=5))
+            path = home / 'sessions' / f'rollout-{thread_id}.jsonl'
+            path.write_text(''.join(json.dumps(row) + '\n' for row in [
+                {'type': 'session_meta', 'payload': {'id': thread_id, 'cwd': directory}},
+                {'type': 'event_msg', 'payload': {'type': 'task_started'}},
+            ]))
+            calls = []
+            class FakeRpc:
+                def __init__(self, path): pass
+                def request(self, method, params):
+                    calls.append((method, params))
+                    if turn_status == 'unavailable':
+                        raise RuntimeError('unsupported method')
+                    if method == 'thread/read':
+                        return {'thread': {'status': {'type': 'active' if turn_status == 'inProgress' else 'idle'}}}
+                    if turn_status == 'empty':
+                        return {'data': []}
+                    if turn_status == 'idleInProgress':
+                        return {'data': [{'status': 'inProgress'}]}
+                    return {'data': [{'status': turn_status, 'completedAt': 1790769438}]}
+                def send(self, value): pass
+                def close(self): pass
+            with (locks / f'{thread_id}.lock').open('a+') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                stat = os.fstat(lock.fileno())
+                identity = (os.major(stat.st_dev), os.minor(stat.st_dev), stat.st_ino)
+                for turn_status, expected in [('completed', 'complete'), ('inProgress', 'running'),
+                                              ('interrupted', 'aborted'), ('failed', 'aborted'),
+                                              ('unavailable', 'running'), ('empty', 'running'),
+                                              ('idleInProgress', 'running')]:
+                    with self.subTest(turn_status=turn_status):
+                        namespace = {'RpcConnection': FakeRpc}
+                        with patch.dict(os.environ, {'CODEX_HOME': directory}), \
+                                patch('sys.argv', ['discover']):
+                            exec(SCRIPT.split('\nif sessions_dir.is_dir():', 1)[0], namespace)
+                        namespace['shared_daemon_state'] = ({thread_id}, {identity})
+                        item = namespace['inspect_session'](path)
+                        self.assertEqual(item['state'], expected)
+                        self.assertTrue(item['remoteOpen'])
+                        if expected == 'complete':
+                            self.assertEqual(item['completedAt'], '2026-09-30T11:57:18Z')
+                # An independent writer must not inherit another server's idle state.
+                namespace['shared_daemon_state'] = ({thread_id}, set())
+                turn_status = 'completed'
+                prior_calls = len(calls)
+                self.assertEqual(namespace['inspect_session'](path)['state'], 'running')
+                self.assertEqual(len(calls), prior_calls)
+            self.assertTrue(any(method == 'thread/turns/list' and params['limit'] == 1
+                                and params['itemsView'] == 'notLoaded' for method, params in calls))
+
     def test_managed_daemon_default_socket_is_recognized(self):
         with tempfile.TemporaryDirectory() as directory:
             home = Path(directory)

@@ -1173,6 +1173,46 @@ def latest_turn_state(path, writer_locked):
     return ("pending" if user_after_task else "not_started"), None
 
 
+def current_turn_state(thread_id, state, completed_at):
+    if state != "running":
+        return state, completed_at
+    loaded, shared_inodes = shared_daemon_threads()
+    if thread_id not in loaded:
+        return state, completed_at
+    rpc = None
+    try:
+        stat = (codex_home / "thread-writer-locks" / f"{thread_id}.lock").stat()
+        if (os.major(stat.st_dev), os.minor(stat.st_dev), stat.st_ino) not in shared_inodes:
+            return state, completed_at
+        rpc = RpcConnection(codex_home / "app-server-control" / "app-server-control.sock")
+        rpc.request("initialize", {
+            "clientInfo": {"name": "ssh_tool_turn_status", "version": "1"},
+            "capabilities": {"experimentalApi": True},
+        })
+        rpc.send({"method": "initialized", "params": {}})
+        thread = rpc.request("thread/read", {"threadId": thread_id, "includeTurns": False})["thread"]
+        if thread.get("status", {}).get("type") != "idle":
+            return state, completed_at
+        turns = rpc.request("thread/turns/list", {
+            "threadId": thread_id, "limit": 1, "sortDirection": "desc", "itemsView": "notLoaded",
+        })["data"]
+        if turns:
+            turn = turns[0]
+            if turn.get("status") == "completed":
+                finished = turn.get("completedAt")
+                stamp = datetime.datetime.fromtimestamp(finished, datetime.timezone.utc).isoformat().replace("+00:00", "Z") if isinstance(finished, (int, float)) else None
+                return "complete", stamp
+            if turn.get("status") in ("interrupted", "failed"):
+                return "aborted", None
+    except Exception:
+        # Older servers or a concurrent unload must not remove the session from the list.
+        pass
+    finally:
+        if rpc is not None:
+            rpc.close()
+    return state, completed_at
+
+
 def inspect_session(path):
     try:
         file_stat = path.stat()
@@ -1264,6 +1304,7 @@ def inspect_session(path):
             writer_locked = lock_is_held(thread_id)
             remote_open = remote_is_open(thread_id, writer_locked)
             state, completed_at = latest_turn_state(path, remote_open)
+            state, completed_at = current_turn_state(thread_id, state, completed_at)
             if state == "not_started" and not writer_locked:
                 return None
 

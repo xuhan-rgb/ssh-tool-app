@@ -172,6 +172,43 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('remote completion updates remote and favorite badges on the next five-second poll even while history is loading', (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    var state = CodexConversationState.running;
+    await tester.pumpWidget(MaterialApp(home: CodexSessionDialog(
+      defaultName: 'codex', defaultWorkDir: '/project',
+      initialFavoriteConversations: const {'native-completion'},
+      loadConversations: (_) => Completer<List<CodexConversation>>().future,
+      loadRemoteOpenConversations: () async => [CodexConversation(
+        id: 'native-completion', cwd: '/project', title: '远程完成的任务',
+        updatedAt: null, state: state, remoteOpen: true)],
+      loadOpenedSessions: () async => const [],
+      loadRunningChatJobs: () async => const {},
+      loadRecords: (_) async => const [],
+      loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
+    )));
+    await tester.pump();
+    expect(find.text('其他端执行中'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('favorites-section-tab')));
+    await tester.pump();
+    expect(find.text('其他端执行中'), findsOneWidget);
+    state = CodexConversationState.complete;
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump();
+    expect(find.text('其他端执行中'), findsNothing);
+    expect(find.text('等待消息'), findsOneWidget);
+    expect(find.byKey(const ValueKey('conversation-progress-native-completion')), findsNothing);
+    await tester.tap(find.text('对话'));
+    await tester.pump();
+    expect(find.text('等待消息'), findsOneWidget);
+    expect(find.text('其他端执行中'), findsNothing);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets('running list refreshes every five seconds without overlap and returns to idle cadence', (tester) async {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;

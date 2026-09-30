@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:ssh_tool_app/services/codex_session_service.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   setUp(() {
     CodexSessionService.clearCache();
     CodexSessionService.runPythonOverride = null;
