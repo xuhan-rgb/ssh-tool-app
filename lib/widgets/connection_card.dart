@@ -3,7 +3,7 @@ import 'package:intl/intl.dart';
 import '../models/ssh_connection.dart';
 import '../theme/app_theme.dart';
 
-enum _ConnectionCardAction { connect, disconnect, edit, delete }
+enum _ConnectionCardAction { connect, disconnect, codexSetup, edit, delete }
 
 class ConnectionCard extends StatelessWidget {
   final SshConnection connection;
@@ -12,6 +12,7 @@ class ConnectionCard extends StatelessWidget {
   final VoidCallback onEdit;
   final VoidCallback onDelete;
   final VoidCallback? onDisconnect;
+  final VoidCallback? onCodexSetup;
 
   const ConnectionCard({
     super.key,
@@ -21,6 +22,7 @@ class ConnectionCard extends StatelessWidget {
     required this.onEdit,
     required this.onDelete,
     this.onDisconnect,
+    this.onCodexSetup,
   });
 
   /// 左侧竖条颜色：SSH 已连接=绿, 默认=紫暗
@@ -48,8 +50,11 @@ class ConnectionCard extends StatelessWidget {
             ),
           ),
           padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 16),
-          child: Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              Row(
+                children: [
               // 图标
               Container(
                 width: 42,
@@ -94,6 +99,8 @@ class ConnectionCard extends StatelessWidget {
                     // 主机
                     Text(
                       connection.connectionString,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 12,
                         fontFamily: 'monospace',
@@ -121,10 +128,14 @@ class ConnectionCard extends StatelessWidget {
                         Icon(Icons.access_time,
                             size: 12, color: AppTheme.textMuted),
                         const SizedBox(width: 3),
-                        Text(
-                          dateFormat.format(connection.updatedAt),
-                          style: TextStyle(
-                              fontSize: 11, color: AppTheme.textMuted),
+                        Flexible(
+                          child: Text(
+                            dateFormat.format(connection.updatedAt),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                                fontSize: 11, color: AppTheme.textMuted),
+                          ),
                         ),
                       ],
                     ),
@@ -143,6 +154,8 @@ class ConnectionCard extends StatelessWidget {
                   ),
                   Icon(Icons.chevron_right,
                       size: 20, color: AppTheme.textMuted),
+                ],
+              ),
                 ],
               ),
             ],
@@ -179,6 +192,18 @@ class ConnectionCard extends StatelessWidget {
           ),
         ),
       );
+    }
+
+    if (onCodexSetup != null) {
+      items.add(const PopupMenuDivider());
+      items.add(const PopupMenuItem(
+        value: _ConnectionCardAction.codexSetup,
+        child: Row(children: [
+          Icon(Icons.settings_suggest_outlined, size: 18),
+          SizedBox(width: 10),
+          Text('Codex 环境配置'),
+        ]),
+      ));
     }
 
     items.addAll([
@@ -235,6 +260,9 @@ class ConnectionCard extends StatelessWidget {
       case _ConnectionCardAction.disconnect:
         onDisconnect?.call();
         break;
+      case _ConnectionCardAction.codexSetup:
+        onCodexSetup?.call();
+        break;
       case _ConnectionCardAction.edit:
         onEdit();
         break;
@@ -266,6 +294,15 @@ class ConnectionCard extends StatelessWidget {
                 onTap: () {
                   Navigator.pop(context);
                   _handleAction(_ConnectionCardAction.disconnect);
+                },
+              ),
+            if (onCodexSetup != null)
+              ListTile(
+                leading: const Icon(Icons.settings_suggest_outlined),
+                title: const Text('Codex 环境配置'),
+                onTap: () {
+                  Navigator.pop(context);
+                  onCodexSetup?.call();
                 },
               ),
             ListTile(

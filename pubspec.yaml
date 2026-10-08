@@ -78,6 +78,8 @@ dev_dependencies:
 flutter:
   assets:
     - assets/claude_runtime.py
+    - assets/codex_environment.sh
+    - assets/codex_runtime.py
     - assets/codex_chat_worker.py
     - assets/codex_terminal_session_id.py
     - assets/codex_steer_message.py

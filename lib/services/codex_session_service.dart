@@ -60,6 +60,7 @@ class CodexConversation {
   final String title;
   final CodexConversationState state;
   final bool writerLocked;
+  final bool sharedService;
   /// Whether a remote Codex instance holds this conversation; null if unknown.
   final bool? remoteOpen;
   final bool directoryExists;
@@ -75,6 +76,7 @@ class CodexConversation {
     required this.title,
     this.state = CodexConversationState.unknown,
     this.writerLocked = false,
+    this.sharedService = false,
     this.remoteOpen,
     this.directoryExists = true,
     this.preview = '',
@@ -93,10 +95,19 @@ class CodexConversation {
           state == CodexConversationState.aborted) &&
       directoryExists;
 
-  bool get canResume => !writerLocked &&
-      (canTakeover ||
-          (!isSubagent && directoryExists && remoteOpen == false &&
-              state == CodexConversationState.pending));
+  bool get canResume =>
+      (sharedService &&
+          !isSubagent &&
+          directoryExists &&
+          (state == CodexConversationState.complete ||
+              state == CodexConversationState.aborted ||
+              state == CodexConversationState.notStarted)) ||
+      (!writerLocked &&
+          (canTakeover ||
+              (!isSubagent &&
+                  directoryExists &&
+                  remoteOpen == false &&
+                  state == CodexConversationState.pending)));
 
   String get recoveryReason {
     if (isSubagent) {
@@ -106,7 +117,7 @@ class CodexConversation {
           : '子代理，需先恢复父对话 ${parent.length > 8 ? parent.substring(0, 8) : parent}';
     }
     if (!directoryExists) return '对话所在目录不存在';
-    if (writerLocked && canTakeover) return 'writer 正在占用，需先接管';
+    if (writerLocked && canTakeover && !sharedService) return 'writer 正在占用，需先接管';
     return switch (state) {
       CodexConversationState.notStarted => '尚未开始一轮对话',
       CodexConversationState.complete => '最后一轮已完成',
@@ -187,6 +198,7 @@ class CodexConversationParser {
             title: (json['title'] as String? ?? '').trim(),
             state: _parseState(json['state'] as String?),
             writerLocked: json['writerLocked'] == true,
+            sharedService: json['sharedService'] == true,
             remoteOpen: json['remoteOpen'] as bool?,
             directoryExists: json['directoryExists'] != false,
             preview: (json['preview'] as String? ?? '').trim(),
@@ -455,7 +467,7 @@ if worker_path.is_file():
             'title': message, 'model': model, 'effort': effort, 'workDir': work_dir}
         worker.start(base64.b64encode(json.dumps(request).encode()).decode())
         sys.exit(0)
-rpc = RpcConnection(Path(os.environ.get('CODEX_HOME', '~/.codex')).expanduser() / 'app-server-control/app-server-control.sock')
+rpc = RpcConnection(control_socket_path(Path(os.environ.get('CODEX_HOME', '~/.codex')).expanduser()))
 try:
     rpc.request('initialize', {'clientInfo': {'name': 'ssh_tool_model', 'version': '1'}, 'capabilities': {'experimentalApi': True}})
     rpc.send({'method': 'initialized', 'params': {}})
@@ -557,7 +569,13 @@ finally:
     await _runPython(
       connectionId,
       _terminalCodexScript,
-      [sessionName, 'resume', conversationId],
+      [
+        sessionName,
+        'resume',
+        conversationId,
+        commandForConversation(conversationId,
+            startupCommand: StorageService.getCodexTerminalCommand(connectionId)),
+      ],
     );
   }
 
@@ -817,10 +835,10 @@ finally:
   static String commandForConversation(
     String conversationId, {
     CodexConversationLaunch launch = CodexConversationLaunch.resume,
+    String startupCommand = StorageService.defaultCodexTerminalCommand,
   }) {
     final command = launch == CodexConversationLaunch.fork ? 'fork' : 'resume';
-    return 'codex --dangerously-bypass-approvals-and-sandbox -p yolo '
-        '$command ${_shellQuote(conversationId)}';
+    return '$startupCommand $command ${_shellQuote(conversationId)}';
   }
 
   static String resumeCommand(String conversationId) {
@@ -906,7 +924,7 @@ for candidate in dict.fromkeys(candidates):
     try:
         env = dict(os.environ)
         env['PATH'] = os.path.dirname(candidate) + os.pathsep + os.environ.get('PATH', os.defpath)
-        process = subprocess.Popen([candidate, 'app-server', '--stdio'],
+        process = subprocess.Popen([candidate, 'app-server'],
                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL, env=env)
         def send(request):
@@ -961,13 +979,43 @@ print('读取远端 Goal 失败：' + last_error, file=sys.stderr)
 sys.exit(1)
 ''';
 
-  static const String _queueMessageScript = r'''import glob
+  static const String _queueMessageScript = r'''import json
+from pathlib import Path
+import glob
 import os
 import shutil
 import subprocess
 import sys
 
 thread_id, message = sys.argv[1:3]
+# Prepared official installations submit via the owning daemon, not a version-specific queue CLI.
+runtime_config = Path.home() / '.ssh_tool/codex_runtime/connection.json'
+if runtime_config.is_file():
+    import base64, importlib.util, uuid
+    sys.path.insert(0, str(Path.home() / '.ssh_tool'))
+    from codex_runtime import read_config, RpcConnection
+    rpc = RpcConnection(Path(read_config()['socketPath']))
+    try:
+        rpc.request('initialize', {'clientInfo': {'name': 'ssh_tool_submit', 'version': '1'}})
+        rpc.send({'method': 'initialized', 'params': {}})
+        thread = rpc.request('thread/read', {'threadId': thread_id, 'includeTurns': False})['thread']
+        if thread['status']['type'] not in ('idle', 'notLoaded'):
+            raise RuntimeError('目标对话状态已变化，本次未发送，请刷新后重试')
+        models = rpc.request('model/list', {})['data']
+        model = next((model for model in models if model.get('isDefault')), models[0] if models else None)
+        if model is None:
+            raise RuntimeError('远端没有可用的 Codex 模型')
+        request = {'jobId': uuid.uuid4().hex, 'threadId': thread_id, 'prompt': message,
+            'title': message, 'workDir': thread['cwd'], 'model': model['id'],
+            'effort': model.get('defaultReasoningEffort', 'medium')}
+    finally:
+        rpc.close()
+    worker_path = Path.home() / '.ssh_tool/codex_chat_worker.py'
+    spec = importlib.util.spec_from_file_location('chat_worker', worker_path)
+    worker = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(worker)
+    worker.start(base64.b64encode(json.dumps(request).encode()).decode())
+    sys.exit(0)
 home = os.path.expanduser('~')
 local_codex = home + '/.local/bin/codex'
 nvm_codex = sorted(
@@ -1042,12 +1090,20 @@ requested_dir = (
     else Path(os.path.expanduser(requested_value)).resolve()
 )
 codex_home = Path(os.environ.get("CODEX_HOME", str(Path.home() / ".codex"))).expanduser()
+runtime_config = Path.home() / ".ssh_tool/codex_runtime/connection.json"
 sessions_dir = codex_home / "sessions"
 session_index_path = codex_home / "session_index.jsonl"
 HEAD_BYTES = 128 * 1024
 TAIL_BYTES = 64 * 1024
 MAX_SESSIONS = 200
 shared_daemon_state = None
+
+
+def control_socket_path():
+    config = Path.home() / '.ssh_tool/codex_runtime/connection.json'
+    if config.is_file():
+        return Path(json.loads(config.read_text(encoding='utf-8'))['socketPath'])
+    return codex_home / 'app-server-control' / 'app-server-control.sock'
 
 
 def load_session_index():
@@ -1134,7 +1190,7 @@ def shared_daemon_threads():
     global shared_daemon_state
     if shared_daemon_state is not None:
         return shared_daemon_state
-    socket_path = codex_home / "app-server-control" / "app-server-control.sock"
+    socket_path = control_socket_path()
     shared_inodes = set()
     shared_pids = {}
     if socket_path.exists():
@@ -1191,6 +1247,20 @@ def remote_is_open(thread_id, writer_locked):
     return thread_id in loaded if identity in shared_inodes else True
 
 
+def is_shared_service_thread(thread_id, writer_locked):
+    if not runtime_config.is_file() or writer_locked is not True:
+        return False
+    loaded, shared_inodes = shared_daemon_threads()
+    if thread_id not in loaded:
+        return False
+    try:
+        stat = (codex_home / "thread-writer-locks" / f"{thread_id}.lock").stat()
+        identity = (os.major(stat.st_dev), os.minor(stat.st_dev), stat.st_ino)
+    except OSError:
+        return False
+    return identity in shared_inodes
+
+
 def latest_turn_state(path, writer_locked):
     # 从末尾倒读完整 JSONL 行；文件头中的旧 task_complete 不能代表当前状态。
     remaining = path.stat().st_size
@@ -1239,7 +1309,7 @@ def current_turn_state(thread_id, state, completed_at):
         stat = (codex_home / "thread-writer-locks" / f"{thread_id}.lock").stat()
         if (os.major(stat.st_dev), os.minor(stat.st_dev), stat.st_ino) not in shared_inodes:
             return state, completed_at
-        rpc = RpcConnection(codex_home / "app-server-control" / "app-server-control.sock")
+        rpc = RpcConnection(control_socket_path())
         rpc.request("initialize", {
             "clientInfo": {"name": "ssh_tool_turn_status", "version": "1"},
             "capabilities": {"experimentalApi": True},
@@ -1358,6 +1428,7 @@ def inspect_session(path):
 
             writer_locked = lock_is_held(thread_id)
             remote_open = remote_is_open(thread_id, writer_locked)
+            shared_service = is_shared_service_thread(thread_id, writer_locked)
             state, completed_at = latest_turn_state(path, remote_open)
             state, completed_at = current_turn_state(thread_id, state, completed_at)
             if state == "not_started" and not writer_locked:
@@ -1372,6 +1443,7 @@ def inspect_session(path):
                 "preview": preview,
                 "state": state,
                 "writerLocked": writer_locked is True,
+                "sharedService": shared_service,
                 "remoteOpen": remote_open,
                 "directoryExists": os.path.isdir(cwd),
                 "isSubagent": is_subagent,
@@ -1441,8 +1513,7 @@ if sessions_dir.is_dir():
 ''';
 
   /// 等待终端中的 Codex 退出，或在同一 tmux 终端恢复原对话。
-  static const String _terminalCodexScript = r'''import shlex
-import subprocess
+  static const String _terminalCodexScript = r'''import subprocess
 import sys
 import time
 
@@ -1476,7 +1547,7 @@ if action == "wait":
 
 if codex_running():
     raise SystemExit("目标终端里的 Codex 已在运行")
-command = "codex --dangerously-bypass-approvals-and-sandbox -p yolo resume " + shlex.quote(sys.argv[3])
+command = sys.argv[4]
 result = subprocess.run(
     ["tmux", "send-keys", "-t", session_name, command, "Enter"],
     capture_output=True, text=True,

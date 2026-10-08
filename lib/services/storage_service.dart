@@ -140,6 +140,7 @@ class StorageService {
     // 清理连接相关设置
     await _settingsBox.delete(_tmuxKey(id));
     await _settingsBox.delete(_claudeEnvKey(id));
+    await _settingsBox.delete(_codexTerminalCommandKey(id));
     for (final kind in [
       'favorite_dirs',
       'favorite_conversations',
@@ -478,6 +479,32 @@ class StorageService {
 
   static Future<void> setHistoryViewerAsPanel(bool value) async {
     await _settingsBox.put('historyViewerAsPanel', value);
+  }
+
+  // ===== Codex 终端启动命令（按连接存储） =====
+
+  static const defaultCodexTerminalCommand = 'codex';
+
+  static String _codexTerminalCommandKey(String connectionId) =>
+      'codex_terminal_command_$connectionId';
+
+  static String getCodexTerminalCommand(String connectionId) {
+    final command =
+        (_settingsBox.get(_codexTerminalCommandKey(connectionId)) as String?)
+            ?.trim();
+    return command == null || command.isEmpty
+        ? defaultCodexTerminalCommand
+        : command;
+  }
+
+  static Future<void> setCodexTerminalCommand(
+      String connectionId, String command) async {
+    final normalized = command.trim();
+    if (normalized.isEmpty) {
+      await _settingsBox.delete(_codexTerminalCommandKey(connectionId));
+    } else {
+      await _settingsBox.put(_codexTerminalCommandKey(connectionId), normalized);
+    }
   }
 
   // ===== Claude 环境变量（按连接存储） =====

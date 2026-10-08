@@ -21,6 +21,7 @@ class _ConnectionFormScreenState extends State<ConnectionFormScreen> {
   late TextEditingController _usernameController;
   late TextEditingController _passwordController;
   late TextEditingController _claudeEnvController;
+  late TextEditingController _codexTerminalCommandController;
 
   bool _usePrivateKey = false;
   bool _obscurePassword = true;
@@ -39,6 +40,9 @@ class _ConnectionFormScreenState extends State<ConnectionFormScreen> {
     _claudeEnvController = TextEditingController(
       text: conn == null ? '' : StorageService.getClaudeEnvText(conn.id),
     );
+    _codexTerminalCommandController = TextEditingController(
+      text: conn == null ? '' : StorageService.getCodexTerminalCommand(conn.id),
+    );
     _usePrivateKey = conn?.usePrivateKey ?? false;
   }
 
@@ -50,6 +54,7 @@ class _ConnectionFormScreenState extends State<ConnectionFormScreen> {
     _usernameController.dispose();
     _passwordController.dispose();
     _claudeEnvController.dispose();
+    _codexTerminalCommandController.dispose();
     super.dispose();
   }
 
@@ -190,6 +195,29 @@ class _ConnectionFormScreenState extends State<ConnectionFormScreen> {
               ),
             ],
 
+            const SizedBox(height: 16),
+            TextFormField(
+              controller: _codexTerminalCommandController,
+              style: const TextStyle(fontFamily: 'monospace'),
+              decoration: const InputDecoration(
+                labelText: 'Codex 终端启动命令',
+                hintText: '例如：codex 或 /完整路径/codex',
+                prefixIcon: Icon(Icons.terminal),
+              ),
+              validator: (value) {
+                if (value != null &&
+                    (value.contains('\n') || value.contains('\r'))) {
+                  return '请输入单行启动命令';
+                }
+                return null;
+              },
+            ),
+            const SizedBox(height: 6),
+            Text(
+              '仅用于 Codex 终端；恢复或 Fork 会自动追加参数。留空使用原有默认命令。',
+              style: TextStyle(color: AppTheme.textMuted, fontSize: 12),
+            ),
+
             if (_showClaudeEnvConfig) ...[
               const SizedBox(height: 16),
               TextFormField(
@@ -294,6 +322,9 @@ class _ConnectionFormScreenState extends State<ConnectionFormScreen> {
         connectionId = connection.id;
       }
 
+      await StorageService.setCodexTerminalCommand(
+        connectionId, _codexTerminalCommandController.text,
+      );
       if (_showClaudeEnvConfig) {
         await StorageService.setClaudeEnvText(connectionId, claudeEnvText);
       }

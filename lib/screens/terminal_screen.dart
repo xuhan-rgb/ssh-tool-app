@@ -14,12 +14,16 @@ class TerminalScreen extends StatefulWidget {
   final SshConnection connection;
   final String? tmuxSessionName;
   final String? tmuxWorkDir;
+  final String? initialCommand;
+  final String? terminalSessionId;
 
   const TerminalScreen({
     super.key,
     required this.connection,
     this.tmuxSessionName,
     this.tmuxWorkDir,
+    this.initialCommand,
+    this.terminalSessionId,
   });
 
   @override
@@ -42,9 +46,9 @@ class _TerminalScreenState extends State<TerminalScreen> {
   Timer? _resizeTimer;
   final ScrollController _scrollController = ScrollController();
 
-  String get _sessionId => widget.tmuxSessionName != null
+  String get _sessionId => widget.terminalSessionId ?? (widget.tmuxSessionName != null
       ? '${widget.connection.id}:${widget.tmuxSessionName}'
-      : widget.connection.id;
+      : widget.connection.id);
 
   @override
   void initState() {
@@ -139,6 +143,13 @@ class _TerminalScreenState extends State<TerminalScreen> {
             "tmux new-session -A -s '$name' -c '$dir'\n",
           );
           StorageService.saveTmuxSession(widget.connection.id, name, dir);
+        }
+      }
+      if (!isReattach && widget.tmuxSessionName == null &&
+          widget.initialCommand != null) {
+        await Future.delayed(const Duration(milliseconds: 350));
+        if (mounted && _isConnected) {
+          SshService.sendInput(_sessionId, '${widget.initialCommand!.trimRight()}\n');
         }
       }
     } catch (e) {

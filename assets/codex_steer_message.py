@@ -116,6 +116,13 @@ class RpcConnection:
             return response['result']
 
 
+def control_socket_path(codex_home):
+    config = Path.home() / '.ssh_tool/codex_runtime/connection.json'
+    if config.is_file():
+        return Path(json.loads(config.read_text(encoding='utf-8'))['socketPath'])
+    return codex_home / 'app-server-control' / 'app-server-control.sock'
+
+
 def steer(rpc, thread_id, message):
     thread = rpc.request('thread/read', {
         'threadId': thread_id, 'includeTurns': False})['thread']
@@ -140,7 +147,7 @@ def steer(rpc, thread_id, message):
 def main():
     thread_id, message = sys.argv[1:3]
     codex_home = Path(os.environ.get('CODEX_HOME', '~/.codex')).expanduser()
-    path = codex_home / 'app-server-control' / 'app-server-control.sock'
+    path = control_socket_path(codex_home)
     rpc = None
     try:
         rpc = RpcConnection(path)

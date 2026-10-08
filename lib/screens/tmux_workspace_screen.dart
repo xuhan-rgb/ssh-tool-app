@@ -9,6 +9,8 @@ import 'package:dartssh2/dartssh2.dart';
 import 'package:xterm/xterm.dart';
 import 'package:xterm/src/core/buffer/cell_offset.dart';
 import '../models/ssh_connection.dart';
+import '../models/remote_directory_listing.dart';
+export '../models/remote_directory_listing.dart';
 import '../services/macos_keyboard_bridge.dart';
 import '../services/notification_service.dart';
 import '../services/codex_session_service.dart';
@@ -26,6 +28,7 @@ import '../widgets/codex_terminal_record.dart';
 import '../widgets/codex_goal_card.dart';
 import '../widgets/codex_model_picker.dart';
 import 'codex_chat_screen.dart';
+import 'codex_new_conversation_screen.dart';
 import 'remote_file_preview_screen.dart';
 import 'codex_notification_history_screen.dart';
 
@@ -73,9 +76,13 @@ extension SessionTypeExt on SessionType {
   String? get autoCommand => switch (this) {
         SessionType.shell => null,
         SessionType.claude => 'claude',
-        SessionType.codex =>
-          'codex --dangerously-bypass-approvals-and-sandbox -p yolo',
+        SessionType.codex => StorageService.defaultCodexTerminalCommand,
       };
+
+  String? autoCommandForConnection(String connectionId) =>
+      this == SessionType.codex
+          ? StorageService.getCodexTerminalCommand(connectionId)
+          : autoCommand;
 
   static SessionType fromString(String? s) => switch (s) {
         'claude' => SessionType.claude,
@@ -552,7 +559,9 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
         StorageService.getOpenedCodexConversations(widget.connectionId);
     _filteredDirectories = {...?widget.initialFilteredDirectories,
       if (!widget.isClaude) ...StorageService.getFilteredCodexDirectories(widget.connectionId)};
-    _openAsChat = widget.initialOpenAsChat ?? (widget.isClaude ? true : StorageService.getCodexChatMode());
+    _openAsChat = widget.isClaude
+        ? (widget.initialOpenAsChat ?? true)
+        : true;
     _remoteOpenOnly = !widget.isClaude && widget.loadRemoteOpenConversations != null;
     _workDir = widget.defaultWorkDir;
     _showAllConversations = widget.startWithAllConversations;
@@ -723,7 +732,9 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       title: conversation.title,
       state: conversation.state == CodexConversationState.running
           ? CodexConversationState.pending : conversation.state,
+      writerLocked: conversation.writerLocked,
       remoteOpen: false,
+      sharedService: conversation.sharedService,
       directoryExists: conversation.directoryExists,
       preview: conversation.preview,
       isSubagent: conversation.isSubagent,
@@ -1389,19 +1400,64 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       if (mounted) unawaited(_refreshActiveConversationStates());
       return;
     }
+    if (!widget.isClaude) {
+      final selected = await Navigator.of(context).push<({String path, bool favorite})>(
+        MaterialPageRoute(
+          builder: (_) => CodexNewConversationScreen(
+            initialPath: _selectedConversation?.cwd ?? _workDir,
+            favoritePaths: {..._favoriteDirectories},
+            loadDirectories: widget.loadDirectories,
+            saveFavoritePaths: (paths) async {
+              final save = widget.saveFavoriteDirectories;
+              if (save != null) {
+                await save(widget.connectionId, paths);
+              } else {
+                await StorageService.setFavoriteCodexDirectories(
+                    widget.connectionId, paths);
+              }
+              if (mounted) {
+                setState(() {
+                  _favoriteDirectories
+                    ..clear()
+                    ..addAll(paths);
+                });
+              }
+            },
+          ),
+        ),
+      );
+      if (!mounted || selected == null) return;
+      setState(() => _selectedConversationId = null);
+      _submit(
+          newWorkDir: selected.path,
+          favoriteOnCreate: selected.favorite,
+          openAsChat: true);
+      return;
+    }
     final favoritePaths = _favoriteDirectories.toList()..sort();
     final currentPath = _selectedConversation?.cwd ?? _workDir;
     var chosenPath = _favoriteDirectories.contains(currentPath)
         ? currentPath
         : _favoriteDirectories.contains(_workDir)
-            ? _workDir
-            : favoritePaths.firstOrNull ?? currentPath;
+        ? _workDir
+        : favoritePaths.firstOrNull ?? currentPath;
     var favorite = true;
     var listingFuture = widget.loadDirectories(chosenPath);
     String? error;
     bool creating = false;
     bool browsing = false;
     bool useChat = true;
+    int directoryRevision = 0;
+    String directoryError(String message) {
+      if (message.contains('No such file or directory')) {
+        return '目录不存在，请选择其他目录。';
+      }
+      if (message.contains('Permission denied')) {
+        return '没有权限访问这个目录，请选择其他目录。';
+      }
+      return '无法读取目录，请检查连接后重试。';
+    }
+
     final selected = await showModalBottomSheet<({String path, bool favorite})>(
       context: context,
       isScrollControlled: true,
@@ -1409,186 +1465,367 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
         builder: (context, updateSheet) => SafeArea(
           child: Padding(
             padding: EdgeInsets.fromLTRB(
-                16, 12, 16, MediaQuery.viewInsetsOf(context).bottom + 12),
-            child: SizedBox(
-              height: MediaQuery.sizeOf(context).height * 0.7,
-              child: Column(children: [
-                ListTile(
-                  title: const Text('新建 Codex 对话'),
-                  subtitle: Text(useChat
-                      ? '先选目录，进入聊天后发送首条消息时启动远程 Codex'
-                      : '打开终端后，在所选目录启动远程 Codex'),
-                ),
-                Card(
-                  key: const ValueKey('new-conversation-selected-directory'),
-                  color: AppTheme.cyan.withValues(alpha: 0.12),
-                  child: ListTile(
-                    leading: Icon(Icons.folder, color: AppTheme.cyan),
-                    title: const Text('工作目录'),
-                    subtitle: Text(chosenPath,
-                        maxLines: 1, overflow: TextOverflow.ellipsis),
-                    trailing: TextButton(
-                      key: const ValueKey('change-new-conversation-directory'),
-                      onPressed: () => updateSheet(() => browsing = !browsing),
-                      child: Text(browsing ? '收起' : '选择其他目录'),
-                    ),
+              16,
+              12,
+              16,
+              MediaQuery.viewInsetsOf(context).bottom + 12,
+            ),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight:
+                    (MediaQuery.sizeOf(context).height -
+                        MediaQuery.viewInsetsOf(context).bottom) *
+                    0.85,
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '新建 Codex 对话',
+                          style: Theme.of(context).textTheme.titleLarge,
+                        ),
+                      ),
+                      IconButton(
+                        tooltip: '关闭',
+                        onPressed: () => Navigator.pop(sheetContext),
+                        icon: const Icon(Icons.close),
+                      ),
+                    ],
                   ),
-                ),
-                if (favoritePaths.isNotEmpty) ...[
-                  const Align(
-                    alignment: Alignment.centerLeft,
-                    child: Text('收藏目录'),
-                  ),
-                  ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 110),
+                  Flexible(
                     child: SingleChildScrollView(
-                      child: Wrap(
-                        spacing: 6,
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
                         children: [
-                          for (final path in favoritePaths)
-                            ChoiceChip(
-                              key: ValueKey('new-directory-favorite-$path'),
-                              label: Text(path,
-                                  maxLines: 1, overflow: TextOverflow.ellipsis),
-                              selected: chosenPath == path,
-                              onSelected: (_) => updateSheet(() {
-                                chosenPath = path;
-                                listingFuture = widget.loadDirectories(path);
-                              }),
+                          const Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text('选择电脑上的项目目录，发送首条消息后创建对话。'),
+                          ),
+                          const SizedBox(height: 12),
+                          Card(
+                            key: const ValueKey(
+                              'new-conversation-selected-directory',
                             ),
+                            color: AppTheme.cyan.withValues(alpha: 0.12),
+                            child: Padding(
+                              padding: const EdgeInsets.all(12),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Icon(
+                                        Icons.folder_outlined,
+                                        color: AppTheme.cyan,
+                                      ),
+                                      const SizedBox(width: 8),
+                                      const Expanded(child: Text('工作目录')),
+                                      TextButton(
+                                        key: const ValueKey(
+                                          'change-new-conversation-directory',
+                                        ),
+                                        onPressed: creating
+                                            ? null
+                                            : () => updateSheet(
+                                                () => browsing = !browsing,
+                                              ),
+                                        child: Text(browsing ? '完成选择' : '更换目录'),
+                                      ),
+                                    ],
+                                  ),
+                                  Text(
+                                    chosenPath,
+                                    maxLines: 3,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                          if (favoritePaths.isNotEmpty) ...[
+                            const Align(
+                              alignment: Alignment.centerLeft,
+                              child: Text('收藏目录'),
+                            ),
+                            ConstrainedBox(
+                              constraints: const BoxConstraints(maxHeight: 110),
+                              child: SingleChildScrollView(
+                                child: Wrap(
+                                  spacing: 6,
+                                  children: [
+                                    for (final path in favoritePaths)
+                                      ChoiceChip(
+                                        key: ValueKey(
+                                          'new-directory-favorite-$path',
+                                        ),
+                                        label: Text(
+                                          path,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        selected: chosenPath == path,
+                                        onSelected: creating
+                                            ? null
+                                            : (_) => updateSheet(() {
+                                          chosenPath = path;
+                                          directoryRevision++;
+                                                error = null;
+                                                listingFuture = widget
+                                                    .loadDirectories(path);
+                                              }),
+                                      ),
+                                  ],
+                                ),
+                              ),
+                            ),
+                          ],
+                          if (browsing) ...[
+                            KeyedSubtree(
+                              key: ValueKey(directoryRevision),
+                              child: TextFormField(
+                                key: const ValueKey(
+                                  'new-conversation-directory',
+                                ),
+                                initialValue: chosenPath,
+                                enabled: !creating,
+                                onChanged: (value) => updateSheet(() {
+                                  chosenPath = value;
+                                  error = null;
+                                }),
+                                onFieldSubmitted: (value) => updateSheet(() {
+                                  listingFuture = widget.loadDirectories(
+                                    value.trim(),
+                                  );
+                                }),
+                                decoration: const InputDecoration(
+                                  labelText: '输入目录路径',
+                                  prefixIcon: Icon(Icons.folder_outlined),
+                                ),
+                              ),
+                            ),
+                            const SizedBox(height: 8),
+                            SizedBox(
+                              height: 220,
+                              child: FutureBuilder<RemoteDirectoryListing>(
+                                future: listingFuture,
+                                builder: (context, snapshot) {
+                                  if (snapshot.hasError) {
+                                    return Center(
+                                      child: Text(
+                                        directoryError(
+                                          snapshot.error.toString(),
+                                        ),
+                                      ),
+                                    );
+                                  }
+                                  if (!snapshot.hasData) {
+                                    return const Center(
+                                      child: CircularProgressIndicator(),
+                                    );
+                                  }
+                                  final listing = snapshot.data!;
+                                  if (listing.error != null) {
+                                    return Column(
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        Text(directoryError(listing.error!)),
+                                        TextButton.icon(
+                                          onPressed: () => updateSheet(() {
+                                            listingFuture = widget
+                                                .loadDirectories(_homePath);
+                                          }),
+                                          icon: const Icon(Icons.home_outlined),
+                                          label: const Text('浏览主目录'),
+                                        ),
+                                      ],
+                                    );
+                                  }
+                                  return ListView(
+                                    children: [
+                                      ListTile(
+                                        title: Text(
+                                          listing.path,
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        trailing: TextButton(
+                                          onPressed: () => updateSheet(() {
+                                                chosenPath = listing.path;
+                                                directoryRevision++;
+                                            error = null;
+                                          }),
+                                          child: const Text('选择此目录'),
+                                        ),
+                                      ),
+                                      if (listing.path != '/')
+                                        ListTile(
+                                          leading: const Icon(
+                                            Icons.arrow_upward,
+                                          ),
+                                          title: const Text('上级目录'),
+                                          onTap: () => updateSheet(() {
+                                            listingFuture = widget
+                                                .loadDirectories(
+                                                  _parentPath(listing.path),
+                                                );
+                                          }),
+                                        ),
+                                      for (final dir in listing.dirs)
+                                        ListTile(
+                                          leading: const Icon(
+                                            Icons.folder_outlined,
+                                          ),
+                                          title: Text(dir),
+                                          onTap: () => updateSheet(() {
+                                            listingFuture = widget
+                                                .loadDirectories(
+                                                  _joinPath(listing.path, dir),
+                                                );
+                                          }),
+                                        ),
+                                    ],
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                          if (widget.isClaude)
+                            ExpansionTile(
+                              key: const ValueKey(
+                                'new-conversation-advanced-options',
+                              ),
+                              tilePadding: EdgeInsets.zero,
+                              title: const Text('更多选项'),
+                              children: [
+                                RadioListTile<bool>(
+                                  key: const ValueKey(
+                                    'new-conversation-mode-chat',
+                                  ),
+                                  value: true,
+                                  groupValue: useChat,
+                                  onChanged: (value) =>
+                                      updateSheet(() => useChat = value!),
+                                  title: const Text('文字聊天'),
+                                  dense: true,
+                                ),
+                                RadioListTile<bool>(
+                                  key: const ValueKey(
+                                    'new-conversation-mode-terminal',
+                                  ),
+                                  value: false,
+                                  groupValue: useChat,
+                                  onChanged: widget.isClaude
+                                      ? (value) =>
+                                            updateSheet(() => useChat = value!)
+                                      : null,
+                                  title: const Text('终端'),
+                                  dense: true,
+                                ),
+                              ],
+                            ),
+                          CheckboxListTile(
+                            key: const ValueKey('favorite-new-conversation'),
+                            value: favorite,
+                            onChanged: creating
+                                ? null
+                                : (value) => updateSheet(() {
+                                    favorite = value ?? true;
+                                  }),
+                            title: const Text('收藏新对话'),
+                            controlAffinity: ListTileControlAffinity.leading,
+                            contentPadding: EdgeInsets.zero,
+                          ),
+                          FutureBuilder<RemoteDirectoryListing>(
+                            future: listingFuture,
+                            builder: (context, snapshot) {
+                              var message = error;
+                              if (message == null &&
+                                  !browsing &&
+                                  snapshot.connectionState ==
+                                      ConnectionState.done) {
+                                final failure = snapshot.hasError
+                                    ? snapshot.error.toString()
+                                    : snapshot.data?.error;
+                                if (failure != null) {
+                                  message = directoryError(failure);
+                                }
+                              }
+                              if (message == null) {
+                                return const SizedBox.shrink();
+                              }
+                              return Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 8,
+                                ),
+                                child: Text(
+                                  message,
+                                  style: TextStyle(color: AppTheme.red),
+                                ),
+                              );
+                            },
+                          ),
                         ],
                       ),
                     ),
                   ),
-                ],
-                if (browsing) ...[
-                  KeyedSubtree(
-                    key: ValueKey(chosenPath),
-                    child: TextFormField(
-                      key: const ValueKey('new-conversation-directory'),
-                      initialValue: chosenPath,
-                      onChanged: (value) => chosenPath = value,
-                      decoration: const InputDecoration(
-                        labelText: '输入目录路径',
-                        prefixIcon: Icon(Icons.folder_outlined),
+                  const SizedBox(height: 8),
+                  SizedBox(
+                    width: double.infinity,
+                    child: FilledButton.icon(
+                      onPressed: creating
+                          ? null
+                          : () async {
+                              updateSheet(() {
+                                creating = true;
+                                error = null;
+                              });
+                              final path = chosenPath.trim();
+                              RemoteDirectoryListing checked;
+                              try {
+                                checked = await widget.loadDirectories(path);
+                              } catch (failure) {
+                                if (!sheetContext.mounted) return;
+                                updateSheet(() {
+                                  creating = false;
+                                  error = directoryError(failure.toString());
+                                });
+                                return;
+                              }
+                              if (!sheetContext.mounted) return;
+                              if (checked.error != null) {
+                                updateSheet(() {
+                                  creating = false;
+                                  error = directoryError(checked.error!);
+                                });
+                                return;
+                              }
+                              Navigator.pop(sheetContext, (
+                                path: checked.path,
+                                favorite: favorite,
+                              ));
+                            },
+                      icon: creating
+                          ? const SizedBox(
+                              width: 18,
+                              height: 18,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          : const Icon(Icons.chat_bubble_outline),
+                      label: Text(
+                        creating
+                            ? '检查目录…'
+                            : useChat
+                            ? '进入聊天'
+                            : '打开终端',
                       ),
                     ),
                   ),
-                  const SizedBox(height: 8),
-                  Expanded(
-                    child: FutureBuilder<RemoteDirectoryListing>(
-                      future: listingFuture,
-                      builder: (context, snapshot) {
-                        if (!snapshot.hasData) {
-                          return const Center(
-                              child: CircularProgressIndicator());
-                        }
-                        final listing = snapshot.data!;
-                        if (listing.error != null) {
-                          return Center(child: Text(listing.error!));
-                        }
-                        return ListView(children: [
-                          ListTile(
-                            title: Text(listing.path,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis),
-                            trailing: TextButton(
-                              onPressed: () => updateSheet(() {
-                                chosenPath = listing.path;
-                              }),
-                              child: const Text('选择此目录'),
-                            ),
-                          ),
-                          if (listing.path != '/')
-                            ListTile(
-                              leading: const Icon(Icons.arrow_upward),
-                              title: const Text('上级目录'),
-                              onTap: () => updateSheet(() {
-                                listingFuture = widget.loadDirectories(
-                                    _parentPath(listing.path));
-                              }),
-                            ),
-                          for (final dir in listing.dirs)
-                            ListTile(
-                              leading: const Icon(Icons.folder_outlined),
-                              title: Text(dir),
-                              onTap: () => updateSheet(() {
-                                listingFuture = widget.loadDirectories(
-                                    _joinPath(listing.path, dir));
-                              }),
-                            ),
-                        ]);
-                      },
-                    ),
-                  ),
-                ] else
-                  const Spacer(),
-                ExpansionTile(
-                  key: const ValueKey('new-conversation-advanced-options'),
-                  tilePadding: EdgeInsets.zero,
-                  title: const Text('更多选项'),
-                  children: [
-                    RadioListTile<bool>(
-                      key: const ValueKey('new-conversation-mode-chat'),
-                      value: true,
-                      groupValue: useChat,
-                      onChanged: (value) => updateSheet(() => useChat = value!),
-                      title: const Text('文字聊天'),
-                      dense: true,
-                    ),
-                    RadioListTile<bool>(
-                      key: const ValueKey('new-conversation-mode-terminal'),
-                      value: false,
-                      groupValue: useChat,
-                      onChanged: (value) => updateSheet(() => useChat = value!),
-                      title: const Text('终端'),
-                      dense: true,
-                    ),
-                  ],
-                ),
-                CheckboxListTile(
-                  key: const ValueKey('favorite-new-conversation'),
-                  value: favorite,
-                  onChanged: (value) => updateSheet(() {
-                    favorite = value ?? true;
-                  }),
-                  title: const Text('收藏新对话'),
-                  controlAffinity: ListTileControlAffinity.leading,
-                  contentPadding: EdgeInsets.zero,
-                ),
-                if (error != null)
-                  Text(error!, style: TextStyle(color: AppTheme.red)),
-                Row(children: [
-                  const Spacer(),
-                  TextButton(
-                    onPressed: () => Navigator.pop(sheetContext),
-                    child: const Text('取消'),
-                  ),
-                  FilledButton(
-                    onPressed: creating
-                        ? null
-                        : () async {
-                            updateSheet(() {
-                              creating = true;
-                              error = null;
-                            });
-                            final path = chosenPath.trim();
-                            final checked = await widget.loadDirectories(path);
-                            if (!sheetContext.mounted) return;
-                            if (checked.error != null) {
-                              updateSheet(() {
-                                creating = false;
-                                error = checked.error;
-                              });
-                              return;
-                            }
-                            Navigator.pop(sheetContext,
-                                (path: checked.path, favorite: favorite));
-                          },
-                    child: Text(useChat ? '进入聊天' : '打开终端'),
-                  ),
-                ]),
-              ]),
+                ],
+              ),
             ),
           ),
         ),
@@ -1600,9 +1837,10 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     }
     setState(() => _selectedConversationId = null);
     _submit(
-        newWorkDir: selected.path,
-        favoriteOnCreate: selected.favorite,
-        openAsChat: useChat);
+      newWorkDir: selected.path,
+      favoriteOnCreate: selected.favorite,
+      openAsChat: useChat,
+    );
   }
 
   bool _canCheckRunningChat(CodexConversation conversation) =>
@@ -2693,6 +2931,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
   }
 
   void _selectOpenMode(bool useChat) {
+    if (!widget.isClaude && !useChat) return;
     setState(() => _openAsChat = useChat);
     if (widget.onOpenModeChanged != null) {
       widget.onOpenModeChanged!(useChat);
@@ -2946,7 +3185,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
           SegmentedButton<bool>(
             key: const ValueKey('codex-open-mode'),
             segments: const [
-              ButtonSegment(value: false, label: Text('终端')),
+              ButtonSegment(value: false, enabled: false, label: Text('终端')),
               ButtonSegment(value: true, label: Text('文字聊天')),
             ],
             selected: {_openAsChat},
@@ -2986,6 +3225,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                 CheckedPopupMenuItem(
                   value: false,
                   checked: !_openAsChat,
+                  enabled: widget.isClaude,
                   child: const Text('终端'),
                 ),
                 CheckedPopupMenuItem(
@@ -3181,7 +3421,7 @@ class CodexConversationViewerDialog extends StatefulWidget {
 }
 
 class _CodexConversationViewerDialogState
-    extends State<CodexConversationViewerDialog> {
+    extends State<CodexConversationViewerDialog> with WidgetsBindingObserver {
   List<CodexConversationRecord> _records = const [];
   (String, String)? _selectedModel;
   bool _loadingModels = false;
@@ -3189,9 +3429,11 @@ class _CodexConversationViewerDialogState
   Duration? _refreshInterval;
   CodexConversationState? _observedState;
   bool _requestInFlight = false;
+  bool _refreshRequested = false;
   late String _logLevel;
   bool _loading = true;
   String? _error;
+  String? _refreshError;
   final _messageController = TextEditingController();
   bool _sendingMessage = false;
   String? _sendError;
@@ -3296,6 +3538,14 @@ class _CodexConversationViewerDialogState
     }
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && !widget.isClaude &&
+        (_pendingMessages.isNotEmpty || widget.conversation.remoteOpen == true)) {
+      unawaited(_loadRecords(quiet: true));
+    }
+  }
+
   void _startRefreshing({Duration? interval}) {
     final nextInterval = interval ?? Duration(seconds: widget.isClaude ? 2 : 1);
     if (_refreshTimer?.isActive == true && _refreshInterval == nextInterval) return;
@@ -3365,6 +3615,7 @@ class _CodexConversationViewerDialogState
                   workDir: widget.conversation.cwd)));
       // 发送完成时窗口可能已关闭；仍需让重开的窗口收到队列状态。
       _pendingMessages.markQueued(pending, route: route);
+      unawaited(_loadRecords(quiet: true));
       if (!mounted) return;
       setState(() => _messageController.clear());
     } catch (error) {
@@ -3379,6 +3630,7 @@ class _CodexConversationViewerDialogState
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _logLevel = StorageService.getCodexViewerLogLevel();
     _selectedModel = StorageService.getCodexConversationModel(widget.connectionId, widget.conversation.id);
     _records = widget.isClaude ? const [] : CodexSessionService.cachedRecords(
@@ -3399,6 +3651,7 @@ class _CodexConversationViewerDialogState
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pendingMessages.removeListener(_pendingMessagesChanged);
     if (widget.isClaude) _pendingMessages.dispose();
     _refreshTimer?.cancel();
@@ -3407,7 +3660,10 @@ class _CodexConversationViewerDialogState
   }
 
   Future<void> _loadRecords({bool quiet = false}) async {
-    if (_requestInFlight) return;
+    if (_requestInFlight) {
+      if (!widget.isClaude) _refreshRequested = true;
+      return;
+    }
     _requestInFlight = true;
     if (!quiet) {
       setState(() {
@@ -3440,6 +3696,7 @@ class _CodexConversationViewerDialogState
         _records = records;
         _loading = false;
         _error = null;
+        _refreshError = null;
         if ((widget.isClaude ? lastKind : latestTask) == 'task_complete') {
           _observedState = CodexConversationState.complete;
         } else if ((widget.isClaude ? lastKind : latestTask) == 'turn_aborted') {
@@ -3461,13 +3718,23 @@ class _CodexConversationViewerDialogState
       }
     } catch (error) {
       if (!mounted) return;
-      if (quiet && _records.isNotEmpty) return;
+      if (!widget.isClaude && (_records.isNotEmpty || _pendingMessages.isNotEmpty)) {
+        setState(() {
+          _loading = false;
+          _refreshError = error.toString();
+        });
+        return;
+      }
       setState(() {
         _loading = false;
         _error = error.toString();
       });
     } finally {
       _requestInFlight = false;
+      if (_refreshRequested && mounted) {
+        _refreshRequested = false;
+        unawaited(_loadRecords(quiet: true));
+      }
     }
   }
 
@@ -3731,6 +3998,24 @@ class _CodexConversationViewerDialogState
             connectionId: widget.connectionId,
             conversationId: widget.conversation.id,
           ),
+        if (_refreshError != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    '同步记录失败，消息处理状态尚未确认：$_refreshError',
+                    style: TextStyle(color: AppTheme.orange, fontSize: 12),
+                  ),
+                ),
+                TextButton(
+                  onPressed: _loading ? null : () => unawaited(_loadRecords()),
+                  child: const Text('重试'),
+                ),
+              ],
+            ),
+          ),
         const SizedBox(height: 10),
         Expanded(
           child: _loading && _records.isEmpty && pending.isEmpty && claudePending.isEmpty
@@ -3911,22 +4196,6 @@ class _CodexConversationViewerDialogState
       ],
     );
   }
-}
-
-class RemoteDirectoryListing {
-  final String path;
-  final List<String> dirs;
-  final String homePath;
-  final List<String> diskPaths;
-  final String? error;
-
-  const RemoteDirectoryListing({
-    required this.path,
-    required this.dirs,
-    this.homePath = '~',
-    this.diskPaths = const [],
-    this.error,
-  });
 }
 
 /// 读取远端目录，供 Codex 选择器和终端工作区共用。
@@ -5656,10 +5925,11 @@ class _TmuxWorkspaceScreenState extends State<TmuxWorkspaceScreen> {
 
   _AutoLaunchCommand _buildAutoLaunchCommand(_TabSession tab) {
     final baseCommand = tab.resumeConversationId == null
-        ? tab.type.autoCommand
+        ? tab.type.autoCommandForConnection(_connectionId)
         : CodexSessionService.commandForConversation(
             tab.resumeConversationId!,
             launch: tab.resumeLaunch,
+            startupCommand: StorageService.getCodexTerminalCommand(_connectionId),
           );
     if (baseCommand == null) {
       return const _AutoLaunchCommand(command: '');

@@ -5,6 +5,7 @@ import '../main.dart';
 import '../models/ssh_connection.dart';
 import '../services/ssh_service.dart';
 import '../services/codex_preload_service.dart';
+import '../services/codex_setup_service.dart';
 import '../services/storage_service.dart';
 import '../services/notification_service.dart';
 import '../theme/app_theme.dart';
@@ -13,6 +14,7 @@ import 'connection_form_screen.dart';
 import 'claude_conversation_picker_screen.dart';
 import 'tmux_workspace_screen.dart';
 import 'codex_notification_history_screen.dart';
+import 'codex_setup_screen.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -177,6 +179,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     onTap: () => _connectToServer(context, connection),
                     onEdit: () => _editConnection(context, connection),
                     onDelete: () => _deleteConnection(context, connection),
+                    onCodexSetup: _assistant == 'codex'
+                        ? () => _openCodexSetup(context, connection)
+                        : null,
                     onDisconnect: isActive
                         ? () => _disconnectSession(context, connection)
                         : null,
@@ -253,14 +258,79 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     MyApp.pendingConnection = connection;
     MyApp.pendingSessionName = null;
 
+    if (_assistant == 'claude') {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          settings: const RouteSettings(name: '/assistant/claude'),
+          builder: (_) => ClaudeConversationPickerScreen(connection: connection),
+        ),
+      );
+      return;
+    }
+
+    CodexSetupStatus setup;
+    try {
+      setup = await CodexSetupService.inspect(connection);
+    } catch (e) {
+      if (context.mounted && ModalRoute.of(context)?.isCurrent == true) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('无法检测 Codex 环境：$e'),
+            action: SnackBarAction(
+              label: '检查环境',
+              onPressed: () => _openCodexSetup(context, connection),
+            ),
+          ),
+        );
+      }
+      return;
+    }
+    if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) return;
+    if (!setup.ready) {
+      await _openCodexSetup(context, connection);
+      if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) return;
+      try {
+        setup = await CodexSetupService.inspect(connection);
+      } catch (e) {
+        if (context.mounted && ModalRoute.of(context)?.isCurrent == true) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('无法检测 Codex 环境：$e'),
+              action: SnackBarAction(
+                label: '检查环境',
+                onPressed: () => _openCodexSetup(context, connection),
+              ),
+            ),
+          );
+        }
+        return;
+      }
+      if (!context.mounted ||
+          ModalRoute.of(context)?.isCurrent != true ||
+          !setup.ready) {
+        return;
+      }
+    }
+    _openCodexPicker(context, connection);
+  }
+
+  void _openCodexPicker(BuildContext context, SshConnection connection) {
+    ScaffoldMessenger.of(context).clearSnackBars();
     Navigator.push(
       context,
       MaterialPageRoute(
-        settings: RouteSettings(name: '/assistant/$_assistant'),
-        builder: (_) => _assistant == 'claude'
-            ? ClaudeConversationPickerScreen(connection: connection)
-            : CodexConversationPickerScreen(connection: connection),
+        settings: const RouteSettings(name: '/assistant/codex'),
+        builder: (_) => CodexConversationPickerScreen(connection: connection),
       ),
+    );
+  }
+
+  Future<void> _openCodexSetup(BuildContext context, SshConnection connection) async {
+    ScaffoldMessenger.of(context).clearSnackBars();
+    await Navigator.push<void>(
+      context,
+      MaterialPageRoute(builder: (_) => CodexSetupScreen(connection: connection)),
     );
   }
 

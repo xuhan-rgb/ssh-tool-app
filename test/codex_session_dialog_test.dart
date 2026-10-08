@@ -1046,62 +1046,57 @@ void main() {
   });
 
   for (final current in ['/b', '/other']) {
-    testWidgets('new conversation defaults to a favorite from $current', (tester) async {
+    testWidgets('new conversation page opens at current directory $current',
+        (tester) async {
       tester.view.physicalSize = const Size(390, 844);
       tester.view.devicePixelRatio = 1;
       addTearDown(tester.view.resetPhysicalSize);
       addTearDown(tester.view.resetDevicePixelRatio);
+      final loadedDirectories = <String>[];
       await tester.pumpWidget(MaterialApp(
         theme: AppTheme.darkTheme,
         home: CodexSessionDialog(
-          defaultName: 'codex', defaultWorkDir: current,
+          defaultName: 'codex',
+          defaultWorkDir: current,
           initialFavoriteDirectories: const {'/a', '/b'},
           loadConversations: (_) async => const [],
           loadRecords: (_) async => const [],
-          loadDirectories: (path) async => RemoteDirectoryListing(path: path, dirs: []),
+          loadDirectories: (path) async {
+            loadedDirectories.add(path);
+            return RemoteDirectoryListing(path: path, dirs: ['child']);
+          },
         ),
       ));
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('新建对话'));
       await tester.pumpAndSettle();
-      expect(find.text('先选目录，进入聊天后发送首条消息时启动远程 Codex'), findsOneWidget);
-      final expected = current == '/b' ? '/b' : '/a';
-      expect(tester.widget<ChoiceChip>(find.byKey(
-          ValueKey('new-directory-favorite-$expected'))).selected, isTrue);
+
       expect(
         find.descendant(
-          of: find.byKey(const ValueKey('new-conversation-selected-directory')),
-          matching: find.text(expected),
+          of: find.byType(AppBar).last,
+          matching: find.text('新建对话'),
         ),
         findsOneWidget,
       );
-      expect(find.widgetWithText(RadioListTile<bool>, '终端'), findsNothing);
-      await tester.tap(find.text('更多选项'));
+      expect(find.text(current), findsOneWidget);
+      expect(find.text('child'), findsOneWidget);
+      expect(loadedDirectories, contains(current));
+      expect(loadedDirectories, isNot(contains('/a')));
+      expect(find.text('在此目录开始聊天'), findsOneWidget);
+      expect(find.text('更多选项'), findsNothing);
+      expect(find.byType(RadioListTile<bool>), findsNothing);
+      expect(find.text('终端'), findsNothing);
+      await tester.tap(find.byTooltip('收藏目录'));
       await tester.pumpAndSettle();
-      expect(find.widgetWithText(RadioListTile<bool>, '文字聊天'), findsOneWidget);
-      expect(tester.widget<RadioListTile<bool>>(
-          find.byKey(const ValueKey('new-conversation-mode-chat'))).groupValue,
-          isTrue);
-      await tester.tap(find.byKey(const ValueKey('new-conversation-mode-terminal')));
+      await tester.tap(find.byKey(const ValueKey('new-directory-favorite-/a')));
       await tester.pumpAndSettle();
-      expect(tester.widget<RadioListTile<bool>>(
-          find.byKey(const ValueKey('new-conversation-mode-terminal'))).groupValue,
-          isFalse);
-      await tester.tap(find.text('更多选项'));
-      await tester.pumpAndSettle();
-      expect(find.byKey(const ValueKey('new-conversation-directory')),
-          findsNothing);
-      final other = expected == '/a' ? '/b' : '/a';
-      await tester.tap(find.byKey(ValueKey('new-directory-favorite-$other')));
-      await tester.pumpAndSettle();
-      expect(find.text(other), findsWidgets);
-      expect(tester.widget<ChoiceChip>(find.byKey(
-          ValueKey('new-directory-favorite-$other'))).selected, isTrue);
-      await tester.pumpWidget(const SizedBox.shrink());
+      expect(find.text('/a'), findsOneWidget);
+      expect(loadedDirectories, contains('/a'));
+      expect(tester.takeException(), isNull);
     });
   }
 
-  testWidgets('new conversation picks a remote directory and favorite default',
+  testWidgets('new conversation child directory returns a chat config',
       (tester) async {
     tester.view.physicalSize = const Size(390, 844);
     tester.view.devicePixelRatio = 1;
@@ -1121,6 +1116,7 @@ void main() {
                       defaultName: 'codex',
                       saveFavoriteDirectories: (_, paths) async { savedDirectories = paths; },
                       defaultWorkDir: '/project',
+                      initialFavoriteDirectories: const {'/project'},
                       loadConversations: (_) async => const [],
                       loadRecords: (_) async => const [],
                       loadDirectories: (path) async => RemoteDirectoryListing(
@@ -1137,32 +1133,90 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.byTooltip('新建对话'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('选择其他目录'));
-    await tester.pumpAndSettle();
-    expect(
-      tester
-          .widget<CheckboxListTile>(
-              find.byKey(const ValueKey('favorite-new-conversation')))
-          .value,
-      isTrue,
-    );
+    expect(find.text('在此目录开始聊天'), findsOneWidget);
     await tester.tap(find.text('child'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('选择此目录'));
-    await tester.pump();
-    expect(find.text('/project/child'), findsWidgets);
-    await tester.tap(find.text('更多选项'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('new-conversation-mode-terminal')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('更多选项'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.widgetWithText(FilledButton, '打开终端'));
+    expect(find.text('/project/child'), findsOneWidget);
+    await tester.tap(find.text('在此目录开始聊天'));
     await tester.pumpAndSettle();
     expect(selected?.workDir, '/project/child');
-    expect(selected?.openAsChat, isFalse);
+    expect(selected?.openAsChat, isTrue);
     expect(selected?.favoriteOnCreate, isTrue);
-    expect(savedDirectories, contains('/project/child'));
+    expect(savedDirectories, isNull);
+  });
+
+  testWidgets('new conversation bookmark manager saves separately from filters',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    const connectionId = 'favorites-and-filters';
+    var storedFavorites = <String>{'/bookmark'};
+    var storedFilters = <String>{'/filter-only'};
+    await tester.pumpWidget(MaterialApp(
+      theme: AppTheme.darkTheme,
+      home: CodexSessionDialog(
+        connectionId: connectionId,
+        defaultName: 'codex',
+        defaultWorkDir: '/project',
+        initialFavoriteDirectories: const {'/bookmark'},
+        initialFilteredDirectories: const {'/filter-only'},
+        saveFavoriteDirectories: (_, paths) async {
+          storedFavorites = Set.of(paths);
+        },
+        saveFilteredDirectories: (_, paths) async {
+          storedFilters = Set.of(paths);
+        },
+        loadConversations: (_) async => const [],
+        loadRecords: (_) async => const [],
+        loadDirectories: (path) async =>
+            RemoteDirectoryListing(path: path, dirs: []),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('新建对话'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('收藏目录'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('添加目录'));
+    await tester.pumpAndSettle();
+    await tester.enterText(
+        find.byKey(const ValueKey('new-conversation-directory')),
+        '/new-bookmark');
+    await tester.tap(find.text('打开'));
+    await tester.pumpAndSettle();
+    expect(
+      storedFavorites,
+      {'/bookmark', '/new-bookmark'},
+    );
+    expect(storedFilters, {'/filter-only'});
+
+    final bookmarkRow =
+        find.byKey(const ValueKey('new-directory-favorite-/bookmark'));
+    await tester.tap(find.descendant(
+      of: bookmarkRow,
+      matching: find.byType(PopupMenuButton<String>),
+    ));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消收藏'));
+    await tester.pumpAndSettle();
+    expect(
+      storedFavorites,
+      {'/new-bookmark'},
+    );
+    expect(storedFilters, {'/filter-only'});
+
+    await tester.tapAt(const Offset(200, 80));
+    await tester.pumpAndSettle();
+    expect(find.byTooltip('收藏目录'), findsOneWidget);
+    await tester.tap(find.byTooltip('Back'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('取消'));
+    await tester.pumpAndSettle();
+    expect(storedFavorites, {'/new-bookmark'});
+    expect(storedFilters, {'/filter-only'});
+    expect(tester.takeException(), isNull);
   });
 
   testWidgets('loads completed conversations once without a refresh control',

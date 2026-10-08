@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 
@@ -60,7 +61,13 @@ def codex_binary() -> str:
     )
 
 
+def prepared_runtime() -> bool:
+    return (Path.home() / '.ssh_tool/codex_runtime/connection.json').is_file()
+
+
 def codex_app_server_command() -> list[str]:
+    if prepared_runtime():
+        return ['python3', str(Path.home() / '.ssh_tool/codex_runtime.py'), 'proxy']
     home = Path.home()
     auth = home / ".local" / "bin" / "codex-auth"
     command = ([str(auth), "run", "--"] if os.access(auth, os.X_OK)
@@ -196,8 +203,24 @@ def start(encoded_request: str) -> None:
             path.rmdir()
             raise RuntimeError("对话目录不存在：" + work_dir)
         if thread_id and writer_locked(thread_id):
-            path.rmdir()
-            raise RuntimeError("该对话正在其他 Codex 窗口中占用，请先结束或接管")
+            if not prepared_runtime():
+                path.rmdir()
+                raise RuntimeError("该对话正在其他 Codex 窗口中占用，请先结束或接管")
+            from codex_runtime import read_config, RpcConnection
+            config = read_config()
+            rpc = RpcConnection(Path(config['socketPath']))
+            try:
+                rpc.request('initialize', {'clientInfo': {'name': 'ssh_tool_guard', 'version': '1'}})
+                rpc.send({'method': 'initialized', 'params': {}})
+                loaded = rpc.request('thread/loaded/list', {})['data']
+                thread = rpc.request('thread/read', {'threadId': thread_id, 'includeTurns': False})['thread']
+                if thread_id not in loaded or thread['status']['type'] != 'idle':
+                    raise RuntimeError('该对话仍由其他运行实例占用，本次未发送')
+            except Exception:
+                path.rmdir()
+                raise
+            finally:
+                rpc.close()
         os.chmod(path, 0o700)
         request_file = path / "request.json"
         request_file.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
@@ -222,6 +245,29 @@ def finish_job(path: Path, state: dict, result: dict, started: float) -> None:
     (path / "request.json").unlink(missing_ok=True)
 
 
+def respond_approval(job_id: str, request_key: str, decision: str) -> None:
+    path = job_path(job_id)
+    with worker_lock():
+        if decision not in ('accept', 'decline'):
+            raise RuntimeError('无效的审批决定')
+        pending = path / 'approval.json'
+        response = path / 'approval-response.json'
+        receipt = path / 'approval-receipt.json'
+        for previous in (response, receipt):
+            if previous.is_file():
+                value = json.loads(previous.read_text(encoding='utf-8'))
+                if value['requestKey'] == request_key:
+                    if value['decision'] != decision:
+                        raise RuntimeError('审批结果已经提交，不能更改')
+                    print(json.dumps({'ok': True}))
+                    return
+        approval = json.loads(pending.read_text(encoding='utf-8'))
+        if approval['requestKey'] != request_key:
+            raise RuntimeError('审批请求已变化，请刷新后重试')
+        save_json(response, {'requestKey': request_key, 'decision': decision})
+    print(json.dumps({'ok': True}))
+
+
 def run(job_id: str) -> None:
     owner_path = job_path(job_id)
     initial_request = json.loads((owner_path / "request.json").read_text(encoding="utf-8"))
@@ -241,17 +287,75 @@ def run(job_id: str) -> None:
                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                        stderr=error_log, env=codex_app_server_environment())
             buffer = b""
+            pending_items = {}
+            current_turn_id = None
 
             def send(message: dict) -> None:
                 process.stdin.write((json.dumps(message) + "\n").encode())
                 process.stdin.flush()
+
+            def handle_message(message):
+                if not isinstance(message, dict):
+                    return {}
+                if message.get('method') == 'item/started':
+                    item = message.get('params', {}).get('item', {})
+                    pending_items[item.get('id')] = item
+                if 'method' not in message or 'id' not in message:
+                    return message
+                method = message['method']
+                if current is None or method not in (
+                        'item/commandExecution/requestApproval', 'item/fileChange/requestApproval'):
+                    send({'id': message['id'], 'error': {'code': -32601,
+                          'message': '手机当前不支持该交互，本次未批准；请通过 Codex 终端继续'}})
+                    if current is not None:
+                        append_event(current[0], {'type': 'activity',
+                            'text': '手机不支持该交互，本次未批准；请通过 Codex 终端继续：' + method})
+                    return {}
+                path = current[0]
+                params = message.get('params', {})
+                if ((params.get('threadId') and params['threadId'] != thread_id) or
+                        (current_turn_id and params.get('turnId') and params['turnId'] != current_turn_id)):
+                    send({'id': message['id'], 'error': {'code': -32602,
+                          'message': '审批不属于当前对话任务'}})
+                    return {}
+                decisions = params.get('availableDecisions')
+                if decisions is not None and not all(choice in decisions for choice in ('accept', 'decline')):
+                    send({'id': message['id'], 'error': {'code': -32601,
+                          'message': '当前审批选项需通过 Codex 终端处理'}})
+                    append_event(current[0], {'type': 'activity', 'text': '当前审批选项不受手机支持，本次未批准'})
+                    return {}
+                item = pending_items.get(params.get('itemId'), {})
+                detail = params.get('command') or item.get('command') or params.get('reason') or 'Codex 请求修改文件'
+                if item.get('changes'):
+                    detail += '\n' + '\n'.join(str(change.get('path', '')) for change in item['changes'])
+                if params.get('grantRoot'):
+                    detail += '\n目录：' + str(params['grantRoot'])
+                approval = {'requestKey': uuid.uuid4().hex, 'method': method, 'detail': str(detail)}
+                with worker_lock():
+                    (path / 'approval-response.json').unlink(missing_ok=True)
+                    save_json(path / 'approval.json', approval)
+                append_event(path, {'type': 'activity', 'text': '等待审批：' + str(detail)})
+                response = path / 'approval-response.json'
+                while not response.exists():
+                    if process.poll() is not None:
+                        raise RuntimeError('等待审批时 Codex 连接已断开')
+                    time.sleep(0.15)
+                value = json.loads(response.read_text(encoding='utf-8'))
+                if value['requestKey'] != approval['requestKey']:
+                    raise RuntimeError('审批响应与当前请求不一致')
+                send({'id': message['id'], 'result': {'decision': value['decision']}})
+                with worker_lock():
+                    save_json(path / 'approval-receipt.json', value)
+                    (path / 'approval.json').unlink(missing_ok=True)
+                    response.unlink(missing_ok=True)
+                return {}
 
             def receive(timeout=1):
                 nonlocal buffer
                 if b"\n" in buffer:
                     line, buffer = buffer.split(b"\n", 1)
                     try:
-                        return json.loads(line)
+                        return handle_message(json.loads(line))
                     except ValueError:
                         return {}
                 ready, _, _ = select.select([process.stdout], [], [], timeout)
@@ -267,7 +371,7 @@ def run(job_id: str) -> None:
                     return None
                 line, buffer = buffer.split(b"\n", 1)
                 try:
-                    return json.loads(line)
+                    return handle_message(json.loads(line))
                 except ValueError:
                     return {}
 
@@ -288,8 +392,10 @@ def run(job_id: str) -> None:
             rpc("initialize", {"clientInfo": {"name": "ssh_tool_app", "version": "1"},
                                 "capabilities": {"experimentalApi": True}})
             send({"method": "initialized", "params": {}})
-            params = {"cwd": work_dir, "model": initial_request["model"],
-                      "approvalPolicy": "never", "sandbox": "danger-full-access"}
+            params = {"cwd": work_dir, "model": initial_request["model"]}
+            if not prepared_runtime():
+                # Preserve existing installations; prepared official runtimes inherit remote policy.
+                params.update({"approvalPolicy": "never", "sandbox": "danger-full-access"})
             if initial_request.get("threadId"):
                 params["threadId"] = initial_request["threadId"]
                 if not initial_request.get("fork"):
@@ -323,10 +429,13 @@ def run(job_id: str) -> None:
                 state["startedAt"] = int(time.time() * 1000)
                 save_state(current_path, state)
                 append_event(current_path, {"type": "started", "threadId": thread_id})
+                current_turn_id = None
+                pending_items.clear()
                 result = rpc("turn/start", {"threadId": thread_id,
                     "input": [{"type": "text", "text": current_request["prompt"], "text_elements": []}],
                     "cwd": os.path.expanduser(current_request["workDir"]),
                     "model": current_request["model"], "effort": current_request["effort"]})
+                current_turn_id = result.get('turn', {}).get('id')
                 current_item = None
                 reasoning_with_deltas = set()
                 draft = ""
@@ -340,6 +449,9 @@ def run(job_id: str) -> None:
                         raise RuntimeError(event["error"].get("message", "Codex 请求失败"))
                     method = event.get("method")
                     params = event.get("params", {})
+                    event_turn_id = params.get('turnId') or params.get('turn', {}).get('id')
+                    if current_turn_id and event_turn_id and event_turn_id != current_turn_id:
+                        continue
                     if method == "item/reasoning/summaryTextDelta":
                         delta = params.get("delta", "")
                         if delta:
@@ -422,6 +534,8 @@ def run(job_id: str) -> None:
                     if queued is None:
                         time.sleep(0.15)
                 if meta.get("closeRequested"):
+                    if prepared_runtime():
+                        rpc('thread/unsubscribe', {'threadId': thread_id})
                     break
                 if queued is None:
                     time.sleep(0.15)
@@ -494,7 +608,12 @@ def snapshot(job_id: str, offset: int) -> dict:
             if state["status"] in ("starting", "running"):
                 state.update({"status": "failed", "error": "远端 tmux 任务已结束"})
                 save_state(path, state)
-    return {"offset": next_offset, "events": events, "state": state}
+    approval_file = path / 'approval.json'
+    try:
+        approval = json.loads(approval_file.read_text(encoding='utf-8'))
+    except FileNotFoundError:
+        approval = None
+    return {"offset": next_offset, "events": events, "state": state, "approval": approval}
 
 
 def poll(job_id: str, offset: int) -> None:
@@ -506,7 +625,7 @@ def follow(job_id: str, offset: int) -> None:
     while True:
         update = snapshot(job_id, offset)
         offset = update["offset"]
-        if update["events"] or update["state"]["status"] not in ("starting", "running"):
+        if update["events"] or update.get('approval') or update["state"]["status"] not in ("starting", "running"):
             print(json.dumps(update, ensure_ascii=False), flush=True)
         if update["state"]["status"] not in ("starting", "running"):
             return
@@ -553,7 +672,7 @@ def find(thread_id: str) -> None:
 if __name__ == "__main__":
     try:
         {"start": start, "run": run, "poll": poll, "follow": follow, "find": find,
-         "session": session, "sessions": sessions, "close": close}[sys.argv[1]](*sys.argv[2:])
+         "session": session, "sessions": sessions, "close": close, "approve": respond_approval}[sys.argv[1]](*sys.argv[2:])
     except Exception as error:
         print(json.dumps({"error": str(error)}, ensure_ascii=False))
         sys.exit(1)

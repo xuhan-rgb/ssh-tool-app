@@ -57,7 +57,7 @@ class CodexSessionDiscoveryTest(unittest.TestCase):
                                               ('idleInProgress', 'running')]:
                     with self.subTest(turn_status=turn_status):
                         namespace = {'RpcConnection': FakeRpc}
-                        with patch.dict(os.environ, {'CODEX_HOME': directory}), \
+                        with patch.dict(os.environ, {'HOME': directory, 'CODEX_HOME': directory}), \
                                 patch('sys.argv', ['discover']):
                             exec(SCRIPT.split('\nif sessions_dir.is_dir():', 1)[0], namespace)
                         namespace['shared_daemon_state'] = ({thread_id}, {identity})
@@ -84,7 +84,7 @@ class CodexSessionDiscoveryTest(unittest.TestCase):
             (control / 'app-server-control.sock').touch()
             definitions = SCRIPT.split('\nif sessions_dir.is_dir():', 1)[0]
             namespace = {}
-            with patch.dict(os.environ, {'CODEX_HOME': directory}), patch('sys.argv', ['discover']):
+            with patch.dict(os.environ, {'HOME': directory, 'CODEX_HOME': directory}), patch('sys.argv', ['discover']):
                 exec(definitions, namespace)
             class FakeRpc:
                 def __init__(self, path): pass
@@ -131,7 +131,7 @@ class CodexSessionDiscoveryTest(unittest.TestCase):
                         with self.subTest(loaded=loaded, daemon_writer=daemon_writer, mode=mode):
                             namespace = {}
                             output = io.StringIO()
-                            with patch.dict(os.environ, {'CODEX_HOME': directory}), \
+                            with patch.dict(os.environ, {'HOME': directory, 'CODEX_HOME': directory}), \
                                     patch('sys.argv', ['discover', mode]), contextlib.redirect_stdout(output):
                                 exec(definitions, namespace)
                                 namespace['shared_daemon_threads'] = lambda: (
@@ -146,6 +146,57 @@ class CodexSessionDiscoveryTest(unittest.TestCase):
                                 self.assertEqual(len(items), 1)
                                 self.assertEqual(items[0]['remoteOpen'], expected_open)
                                 self.assertIs(items[0]['writerLocked'], True)
+
+    def test_shared_service_annotation_requires_prepared_loaded_daemon_writer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory)
+            (home / 'sessions').mkdir()
+            (home / 'thread-writer-locks').mkdir()
+            thread_id = str(uuid.UUID(int=44))
+            rollout = home / 'sessions' / f'rollout-{thread_id}.jsonl'
+            rollout.write_text(''.join(json.dumps(row) + '\n' for row in [
+                {'type': 'session_meta', 'payload': {'id': thread_id, 'cwd': directory}},
+                {'type': 'event_msg', 'payload': {'type': 'task_complete'}},
+            ]))
+            config = home / '.ssh_tool/codex_runtime/connection.json'
+            config.parent.mkdir(parents=True)
+            config.write_text(json.dumps({'socketPath': str(home / 'control.sock')}))
+            lock_path = home / 'thread-writer-locks' / f'{thread_id}.lock'
+            with lock_path.open('a+') as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                stat = lock_path.stat()
+                identity = (os.major(stat.st_dev), os.minor(stat.st_dev), stat.st_ino)
+                namespace = {}
+                with patch.dict(os.environ, {'HOME': directory, 'CODEX_HOME': directory}), \
+                        patch('sys.argv', ['discover', '__opened__']), contextlib.redirect_stdout(io.StringIO()):
+                    exec(SCRIPT.split('\nif sessions_dir.is_dir():', 1)[0], namespace)
+                namespace['shared_daemon_threads'] = lambda: ({thread_id}, {identity})
+                with patch.dict(os.environ, {'HOME': directory, 'CODEX_HOME': directory}), \
+                        patch('sys.argv', ['discover', '__opened__']):
+                    namespace['shared_daemon_state'] = None
+                    items = []
+                    namespace['print'] = lambda value: items.append(json.loads(value))
+                    exec('if sessions_dir.is_dir():' + SCRIPT.split('\nif sessions_dir.is_dir():', 1)[1], namespace)
+                self.assertTrue(items[0]['sharedService'])
+
+                # A daemon-loaded thread is insufficient without the prepared config or its lock.
+                config.unlink()
+                namespace['shared_daemon_threads'] = lambda: ({thread_id}, {identity})
+                items = []
+                namespace['print'] = lambda value: items.append(json.loads(value))
+                with patch.dict(os.environ, {'HOME': directory, 'CODEX_HOME': directory}), \
+                        patch('sys.argv', ['discover', '__opened__']):
+                    exec('if sessions_dir.is_dir():' + SCRIPT.split('\nif sessions_dir.is_dir():', 1)[1], namespace)
+                self.assertFalse(items[0]['sharedService'])
+
+                config.write_text(json.dumps({'socketPath': str(home / 'control.sock')}))
+                namespace['shared_daemon_threads'] = lambda: ({thread_id}, set())
+                items = []
+                namespace['print'] = lambda value: items.append(json.loads(value))
+                with patch.dict(os.environ, {'HOME': directory, 'CODEX_HOME': directory}), \
+                        patch('sys.argv', ['discover', '__opened__']):
+                    exec('if sessions_dir.is_dir():' + SCRIPT.split('\nif sessions_dir.is_dir():', 1)[1], namespace)
+                self.assertFalse(items[0]['sharedService'])
 
     def test_open_chinese_conversation_survives_tail_cut_inside_utf8_character(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -173,7 +224,7 @@ class CodexSessionDiscoveryTest(unittest.TestCase):
                     for mode in ['__all__', '__opened__', '__running__']:
                         with self.subTest(indexed=indexed, mode=mode):
                             result = subprocess.run(['python3', '-c', SCRIPT, mode],
-                                env={**os.environ, 'CODEX_HOME': directory},
+                                env={**os.environ, 'HOME': directory, 'CODEX_HOME': directory},
                                 capture_output=True, text=True, check=True)
                             items = [json.loads(line) for line in result.stdout.splitlines()]
                             self.assertEqual([item['id'] for item in items], [thread_id])
@@ -196,7 +247,7 @@ class CodexSessionDiscoveryTest(unittest.TestCase):
             def query(mode):
                 result = subprocess.run(
                     ['python3', '-c', SCRIPT, mode],
-                    env={**os.environ, 'CODEX_HOME': directory},
+                    env={**os.environ, 'HOME': directory, 'CODEX_HOME': directory},
                     capture_output=True, text=True, check=True,
                 )
                 return [json.loads(line) for line in result.stdout.splitlines()]
@@ -227,7 +278,7 @@ class CodexSessionDiscoveryTest(unittest.TestCase):
             def inspect():
                 result = subprocess.run(
                     ['python3', '-c', SCRIPT, '__all__'],
-                    env={**os.environ, 'CODEX_HOME': directory},
+                    env={**os.environ, 'HOME': directory, 'CODEX_HOME': directory},
                     capture_output=True, text=True, check=True,
                 )
                 item = json.loads(result.stdout)
@@ -269,7 +320,7 @@ class CodexSessionDiscoveryTest(unittest.TestCase):
             def page(offset):
                 result = subprocess.run(
                     ['python3', '-c', SCRIPT, '__all__', str(offset)],
-                    env={**os.environ, 'CODEX_HOME': directory},
+                    env={**os.environ, 'HOME': directory, 'CODEX_HOME': directory},
                     capture_output=True, text=True, check=True,
                 )
                 return [json.loads(line)['id'] for line in result.stdout.splitlines()]
@@ -284,7 +335,7 @@ class CodexSessionDiscoveryTest(unittest.TestCase):
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 result = subprocess.run(
                     ['python3', '-c', SCRIPT, '__opened__'],
-                    env={**os.environ, 'CODEX_HOME': directory},
+                    env={**os.environ, 'HOME': directory, 'CODEX_HOME': directory},
                     capture_output=True, text=True, check=True,
                 )
                 opened = [json.loads(line) for line in result.stdout.splitlines()]

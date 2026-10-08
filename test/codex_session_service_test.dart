@@ -25,6 +25,25 @@ void main() {
     expect(pending(open: false, subagent: true).canResume, isFalse);
   });
 
+  test('idle locked shared-service conversations can resume without takeover', () {
+    CodexConversation parse(Map<String, Object?> value) =>
+        CodexConversationParser.parse(jsonEncode({
+          'id': 'shared-idle',
+          'cwd': '/project',
+          'state': 'complete',
+          'writerLocked': true,
+          ...value,
+        })).single;
+
+    final shared = parse({'sharedService': true});
+    expect(shared.canResume, isTrue);
+    expect(shared.recoveryReason, '最后一轮已完成');
+    expect(parse({}).canResume, isFalse);
+    expect(parse({'sharedService': true, 'state': 'running'}).canResume, isFalse);
+    expect(parse({'sharedService': true, 'directoryExists': false}).canResume, isFalse);
+    expect(parse({'sharedService': true, 'isSubagent': true}).canResume, isFalse);
+  });
+
   test('parses remote open state independently of task completion', () {
     for (final open in [true, false, null]) {
       final conversation = CodexConversationParser.parse(jsonEncode({
@@ -179,7 +198,7 @@ void main() {
         '输入 120 · 输出 30 · 缓存命中 80 · 命中率 66.7%');
     expect(
       CodexSessionService.forkCommand('session-123'),
-      "codex --dangerously-bypass-approvals-and-sandbox -p yolo fork 'session-123'",
+      "codex fork 'session-123'",
     );
   });
 
@@ -254,7 +273,7 @@ void main() {
   test('builds a shell-safe Codex resume command', () {
     expect(
       CodexSessionService.resumeCommand("session'with-quote"),
-      "codex --dangerously-bypass-approvals-and-sandbox -p yolo resume 'session'\"'\"'with-quote'",
+      "codex resume 'session'\"'\"'with-quote'",
     );
   });
 

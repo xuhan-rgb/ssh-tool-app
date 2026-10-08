@@ -8,9 +8,9 @@
 
 ## 运行机制
 
-辅助脚本部署到 ~/.ssh_tool/，原子替换、用户权限目录，重复准备不重复创建服务。检测官方 daemon start、proxy、--remote 的实际能力。通过原生 daemon start 获得 socketPath，并完成 initialize/model/list 验证后标记准备成功。已安装 codex-auth 时兼容其账户环境；否则直接运行 codex。不要求 yolo profile，不修改 .bashrc。
+辅助脚本部署到 ~/.ssh_tool/，原子替换、用户权限目录，重复准备不重复创建服务。检测官方 daemon start、--remote 的实际能力。优先通过原生 daemon start 获得 socketPath；无 daemon 管理能力但支持 Unix socket 时通过专用 tmux 会话启动官方 app-server，并完成 initialize/model/list 验证后标记准备成功。已安装 codex-auth 时兼容其账户环境；否则直接运行 codex。不要求额外权限 profile；环境准备不修改 .bashrc，电脑快捷命令由用户另外点击配置。
 
-准备后的聊天 worker 使用同一 daemon 的 stdio proxy，保持现有后台 tmux、请求文件、jobId 去重、排队、断线跟随。终端启动脚本使用同一 socket 和 --remote，转发 resume/fork 参数。自定义终端命令优先。既有未准备环境保留旧运行方式，避免破坏现有会话。
+准备后的聊天 worker 使用软件的 JSONL/WebSocket 桥接器连接同一 daemon，保持现有后台 tmux、请求文件、jobId 去重、排队、断线跟随。终端启动脚本使用同一 socket 和 --remote，转发 resume/fork 参数。自定义终端命令优先。既有未准备环境保留旧运行方式，避免破坏现有会话。
 
 共享服务连接和查询使用记录的实际 socket 地址，保留缺省控制 socket 的兼容查询。关闭应用自有空闲会话只取消自身订阅，不停止共享 daemon。运行中不可自动恢复成第二个写入实例。
 
@@ -19,3 +19,9 @@
 ## 验证
 
 窄范围 Python 集成测试、Flutter 服务/组件测试覆盖：检测缺失/能力不足/未登录，prepare 原子部署和幂等，daemon/proxy/socket 路由，无 codex-auth/profile 的官方运行路径，审批处理，多轮、断线跟随、去重、关闭、状态回归。隔离 HOME/CODEX_HOME 的真实 Codex 验证服务和协议初始化，不使用真实账号或付费任务。构建 Android APK；无实机 UI 或截图检查授权，不启动实机检查。
+
+## 2026-10-08 后续确认
+
+用户授权配置 `.bashrc`，并取消独立的“电脑端启动”入口。用户点击“配置电脑命令”后配置 `codex-phone` 快捷命令：安装独立脚本、幂等添加 PATH、修改前备份 `.bashrc`，保留用户已有的启动命令。准备完成后说明在项目目录运行命令以及 resume 用法。验收包括手机继续电脑启动的同一对话，以及手机指定目录创建对话。
+
+用户进一步明确：电脑快捷命令与手机文字聊天独立，手机直接调用共享服务并传入 cwd。`.bashrc` 配置必须由用户点击独立的“配置电脑命令”操作触发，环境准备不配置快捷命令；软件说明使用通用命令，不提用户本地脚本。

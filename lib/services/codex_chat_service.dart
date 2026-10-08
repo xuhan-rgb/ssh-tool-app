@@ -48,6 +48,12 @@ class CodexRemoteSessionStatus {
   const CodexRemoteSessionStatus({required this.open, required this.busy});
 }
 
+class CodexApproval {
+  final String jobId, requestKey, method, detail;
+  const CodexApproval({required this.jobId, required this.requestKey,
+    required this.method, required this.detail});
+}
+
 class CodexChatService {
   static const defaultModel = 'gpt-6-sol';
   static final Set<String> _installedWorkers = {};
@@ -119,8 +125,10 @@ codex = next((path for path in reversed(candidates) if os.access(path, os.X_OK))
              shutil.which('codex') or 'codex')
 auth = home + '/.local/bin/codex-auth'
 command = ([auth, 'run', '--'] if os.access(auth, os.X_OK) else [codex])
-command += ['--dangerously-bypass-approvals-and-sandbox']
-command += ['app-server', '--stdio']
+command += ['app-server']
+runtime = os.path.join(home, '.ssh_tool/codex_runtime.py')
+if os.path.isfile(os.path.join(home, '.ssh_tool/codex_runtime/connection.json')):
+    command = ['python3', runtime, 'proxy']
 requests = [
     {'id': 1, 'method': 'initialize', 'params': {'clientInfo': {'name': 'ssh_tool_app', 'version': '1'}}},
     {'method': 'initialized', 'params': {}},
@@ -241,6 +249,15 @@ finally:
     return jobId;
   }
 
+  static Future<void> respondToApproval(String connectionId,
+      CodexApproval approval, bool accept) async {
+    final response = await _remoteJson(connectionId,
+      'python3 "\$HOME/.ssh_tool/codex_chat_worker.py" approve '
+      '${_quote(approval.jobId)} ${_quote(approval.requestKey)} '
+      '${_quote(accept ? 'accept' : 'decline')}');
+    if (response['ok'] != true) throw StateError('远端未确认审批结果');
+  }
+
   static Future<String?> findRunningJob(
       String connectionId, String threadId) async {
     final response = await _remoteJson(
@@ -326,6 +343,7 @@ print(json.dumps(jobs))
     void Function(String text)? onUpdate,
     void Function(String text)? onActivity,
     void Function(DateTime startedAt)? onStartedAt,
+    void Function(CodexApproval approval)? onApproval,
   }) async {
     final progress = CodexJobProgress(
       onUpdate: onUpdate,
@@ -357,6 +375,13 @@ print(json.dumps(jobs))
                 throw CodexJobFailure(response['error'].toString());
               }
               reconnects = 0;
+              final approval = response['approval'];
+              if (approval is Map) {
+                onApproval?.call(CodexApproval(jobId: jobId,
+                  requestKey: approval['requestKey'] as String,
+                  method: approval['method'] as String,
+                  detail: approval['detail'] as String));
+              }
               final result = progress.read(response);
               if (result != null) {
                 await NotificationService.showCodexFinished(
@@ -399,6 +424,7 @@ print(json.dumps(jobs))
     void Function(String text)? onUpdate,
     void Function(String text)? onActivity,
     void Function(DateTime startedAt)? onStartedAt,
+    void Function(CodexApproval approval)? onApproval,
   }) async {
     final jobId = await _startJob(
       connectionId: connectionId,
@@ -416,6 +442,7 @@ print(json.dumps(jobs))
       onUpdate: onUpdate,
       onActivity: onActivity,
       onStartedAt: onStartedAt,
+      onApproval: onApproval,
     );
   }
 }

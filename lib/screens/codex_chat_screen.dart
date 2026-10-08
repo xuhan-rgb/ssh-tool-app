@@ -56,6 +56,88 @@ class CodexChatScreen extends StatefulWidget {
   State<CodexChatScreen> createState() => _CodexChatScreenState();
 }
 
+class CodexApprovalPanel extends StatefulWidget {
+  final CodexApproval approval;
+  final Future<void> Function(bool accept) onRespond;
+
+  const CodexApprovalPanel({
+    super.key,
+    required this.approval,
+    required this.onRespond,
+  });
+
+  @override
+  State<CodexApprovalPanel> createState() => _CodexApprovalPanelState();
+}
+
+class _CodexApprovalPanelState extends State<CodexApprovalPanel> {
+  bool _busy = false;
+  String? _error;
+
+  Future<void> _respond(bool accept) async {
+    if (_busy) return;
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      await widget.onRespond(accept);
+    } catch (error) {
+      if (mounted) setState(() => _error = '响应失败：$error');
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => Card(
+        key: const ValueKey('codex-approval-panel'),
+        margin: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text('Codex 需要确认', style: Theme.of(context).textTheme.titleSmall),
+              if (widget.approval.detail.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 160),
+                    child: SingleChildScrollView(
+                      child: SelectableText(widget.approval.detail),
+                    ),
+                  ),
+                ),
+              if (_error != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(_error!,
+                      key: const ValueKey('codex-approval-error'),
+                      style: TextStyle(
+                          color: Theme.of(context).colorScheme.error)),
+                ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                children: [
+                  OutlinedButton(
+                    onPressed: _busy ? null : () => _respond(true),
+                    child: Text(_busy ? '处理中…' : '允许本次'),
+                  ),
+                  TextButton(
+                    onPressed: _busy ? null : () => _respond(false),
+                    child: const Text('拒绝'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+}
+
 class _CodexChatScreenState extends State<CodexChatScreen>
     with WidgetsBindingObserver {
   final _input = TextEditingController();
@@ -67,6 +149,8 @@ class _CodexChatScreenState extends State<CodexChatScreen>
   String? _error;
   bool _loading = false;
   bool _sending = false;
+  CodexApproval? _pendingApproval;
+  final Set<String> _suppressedApprovalKeys = {};
   bool _remoteSessionOpen = false;
   bool _remoteSessionClosedByUser = false;
   bool _closingRemoteSession = false;
@@ -78,6 +162,8 @@ class _CodexChatScreenState extends State<CodexChatScreen>
   TextEditingValue? _draftBeforeTopMenu;
   double _keyboardInset = 0;
   int _historyRequest = 0;
+  bool _historyRequestInFlight = false;
+  Timer? _historyRefresh;
   final List<String> _queuedPrompts = [];
   bool _showMessageTime = true;
   bool _showTokenUsage = false;
@@ -226,6 +312,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
         unawaited(_loadHistory().then((_) => _recoverRunningTurn()));
       }
       if (!_forkPending) unawaited(_refreshRemoteSession());
+      _startHistoryRefresh();
     }
     unawaited(_loadModels());
   }
@@ -234,6 +321,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _streamRefresh?.cancel();
+    _historyRefresh?.cancel();
     _elapsedTimer?.cancel();
     _inputFocus.dispose();
     _input.dispose();
@@ -254,7 +342,30 @@ class _CodexChatScreenState extends State<CodexChatScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(_refreshRemoteSession());
+      unawaited(_refreshIdleHistory());
     }
+  }
+
+  bool get _isCurrentRoute => ModalRoute.of(context)?.isCurrent ?? true;
+
+  void _startHistoryRefresh() {
+    _historyRefresh?.cancel();
+    _historyRefresh = Timer.periodic(const Duration(seconds: 3), (_) {
+      unawaited(_refreshIdleHistory());
+    });
+  }
+
+  Future<void> _refreshIdleHistory() async {
+    if (!mounted ||
+        _threadId == null ||
+        _sending ||
+        _forkPending ||
+        _queuedPrompts.isNotEmpty ||
+        WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed ||
+        !_isCurrentRoute) {
+      return;
+    }
+    await _loadHistory(quiet: true);
   }
 
   Future<void> _refreshRemoteSession() async {
@@ -311,17 +422,25 @@ class _CodexChatScreenState extends State<CodexChatScreen>
     }
   }
 
-  Future<void> _loadHistory() async {
+  Future<void> _loadHistory({bool quiet = false}) async {
     final id = _threadId;
-    if (id == null) return;
+    if (id == null || _historyRequestInFlight) return;
     final request = ++_historyRequest;
-    setState(() => _loading = true);
+    _historyRequestInFlight = true;
+    if (!quiet && mounted) setState(() => _loading = true);
     try {
       final records = await CodexSessionService.readConversation(
         widget.connection.id,
         id,
       );
       if (!mounted || request != _historyRequest) return;
+      if (quiet &&
+          (_sending ||
+              WidgetsBinding.instance.lifecycleState !=
+                  AppLifecycleState.resumed ||
+              !_isCurrentRoute)) {
+        return;
+      }
       final followLatest = !_scroll.hasClients ||
           _scroll.position.extentAfter < 80;
       setState(() {
@@ -329,16 +448,20 @@ class _CodexChatScreenState extends State<CodexChatScreen>
           ..._archivedRecords,
           ...records.where(_isVisibleChatRecord),
         ];
-        _loading = false;
+        if (!quiet) _loading = false;
         _error = null;
       });
       if (followLatest) _scrollToEnd();
     } catch (error) {
       if (!mounted || request != _historyRequest) return;
-      setState(() {
-        _loading = false;
-        _error = '读取对话失败：$error';
-      });
+      if (!quiet) {
+        setState(() {
+          _loading = false;
+          _error = '读取对话失败：$error';
+        });
+      }
+    } finally {
+      _historyRequestInFlight = false;
     }
   }
 
@@ -481,6 +604,31 @@ class _CodexChatScreenState extends State<CodexChatScreen>
     _refreshStream();
   }
 
+  void _onApproval(CodexApproval approval) {
+    if (!mounted) return;
+    if (_suppressedApprovalKeys.contains(_approvalKey(approval))) return;
+    final current = _pendingApproval;
+    if (current?.requestKey == approval.requestKey &&
+        current?.jobId == approval.jobId) {
+      return;
+    }
+    setState(() => _pendingApproval = approval);
+  }
+
+  Future<void> _respondToApproval(CodexApproval approval, bool accept) async {
+    await CodexChatService.respondToApproval(
+        widget.connection.id, approval, accept);
+    _suppressedApprovalKeys.add(_approvalKey(approval));
+    if (mounted &&
+        _pendingApproval?.jobId == approval.jobId &&
+        _pendingApproval?.requestKey == approval.requestKey) {
+      setState(() => _pendingApproval = null);
+    }
+  }
+
+  String _approvalKey(CodexApproval approval) =>
+      '${approval.jobId}:${approval.requestKey}';
+
   void _startElapsedTimer() {
     _turnStartedAt ??= DateTime.now();
     _elapsedTimer?.cancel();
@@ -545,6 +693,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
             onUpdate: _updateStreamedAnswer,
             onActivity: _updateActivity,
             onStartedAt: _setTurnStartedAt,
+            onApproval: _onApproval,
           ));
       _stopElapsedTimer();
       if (!mounted) {
@@ -557,6 +706,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
       _streamRefresh = null;
       setState(() {
         _sending = false;
+        _pendingApproval = null;
         _streamedAnswer = '';
         _lastTurnDurationSeconds = result.durationSeconds ??
             DateTime.now().difference(_turnStartedAt!).inSeconds;
@@ -571,6 +721,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
       _streamRefresh = null;
       setState(() {
         _sending = false;
+        _pendingApproval = null;
         _streamedAnswer = '';
         _error = '读取远端任务失败：$error';
         _clearPending = false;
@@ -598,9 +749,12 @@ class _CodexChatScreenState extends State<CodexChatScreen>
 
   Future<void> _sendPrompt(String prompt) async {
     final creatingConversation = _threadId == null;
+    _historyRequest++;
+    _suppressedApprovalKeys.clear();
     _remoteSessionRequest++;
     setState(() {
       _sending = true;
+      _pendingApproval = null;
       _streamedAnswer = '';
       _activity = '';
       _turnStartedAt = DateTime.now();
@@ -631,6 +785,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
             onUpdate: _updateStreamedAnswer,
             onActivity: _updateActivity,
             onStartedAt: _setTurnStartedAt,
+            onApproval: _onApproval,
           ));
       unawaited(StorageService.setCodexConversationModel(
           _detachedConnectionId, result.threadId, (_model, _effort)));
@@ -658,6 +813,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
         _remoteSessionClosedByUser = false;
         _forkPending = false;
         _sending = false;
+        _pendingApproval = null;
         _streamedAnswer = '';
         _lastTurnDurationSeconds = result.durationSeconds ??
             DateTime.now().difference(_turnStartedAt!).inSeconds;
@@ -672,6 +828,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
           ];
         }
       });
+      _startHistoryRefresh();
       if (followLatest) _scrollToEnd();
       if (widget.sendMessage == null) await _loadHistory();
       _sendNextQueued();
@@ -683,6 +840,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
       if (_input.text.isEmpty) _input.text = prompt;
       setState(() {
         _sending = false;
+        _pendingApproval = null;
         _streamedAnswer = '';
         _error = error.toString();
         _clearPending = false;
@@ -1181,6 +1339,13 @@ class _CodexChatScreenState extends State<CodexChatScreen>
                   ),
                 ],
               ),
+            ),
+          if (_pendingApproval case final approval?)
+            CodexApprovalPanel(
+              key: ValueKey(
+                  'codex-approval-${approval.jobId}-${approval.requestKey}'),
+              approval: approval,
+              onRespond: (accept) => _respondToApproval(approval, accept),
             ),
           Expanded(
             child: _loading && _records.isEmpty

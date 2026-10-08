@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'package:ssh_tool_app/screens/tmux_workspace_screen.dart';
 import 'package:ssh_tool_app/services/codex_session_service.dart';
 import 'package:ssh_tool_app/widgets/chat_markdown.dart';
@@ -273,5 +275,113 @@ void main() {
     expect(find.textContaining('queue is unsupported'), findsOneWidget);
     expect(find.text('已发送到远程队列'), findsNothing);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('shows refresh failure with cached records and recovers queued message',
+      (tester) async {
+    var failRefresh = false;
+    var recovered = false;
+    var sends = 0;
+    var reads = 0;
+    await tester.pumpWidget(MaterialApp(
+      home: CodexConversationViewerDialog(
+        conversation: const CodexConversation(id: 'sync-thread', cwd: '/p',
+            title: '同步诊断', updatedAt: null,
+            state: CodexConversationState.complete),
+        sendMessage: (_) async {
+          sends++;
+          return CodexMessageRoute.queue;
+        },
+        loadRecords: (_) async {
+          reads++;
+          if (failRefresh && !recovered) {
+            throw StateError('connection reset');
+          }
+          return [
+            const CodexConversationRecord(kind: 'user', timestamp: null,
+                text: 'hello'),
+            if (recovered)
+              const CodexConversationRecord(kind: 'user', timestamp: null,
+                  text: 'secondhello'),
+            const CodexConversationRecord(kind: 'assistant', timestamp: null,
+                text: 'answer'),
+            const CodexConversationRecord(kind: 'task_complete',
+                timestamp: null, text: '完成'),
+          ];
+        },
+      ),
+    ));
+    await tester.pump();
+    await tester.pump();
+    failRefresh = true;
+    await tester.enterText(
+        find.byKey(const ValueKey('viewer-message-input')), 'secondhello');
+    await tester.tap(find.byKey(const ValueKey('viewer-send-message')));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.textContaining('同步记录失败，消息处理状态尚未确认'), findsOneWidget);
+    expect(find.textContaining('connection reset'), findsOneWidget);
+    expect(find.text('已发送到远程队列'), findsOneWidget);
+    expect(find.text('hello'), findsOneWidget);
+    expect(sends, 1);
+
+    final readsBeforeResume = reads;
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await tester.pump();
+    expect(reads, greaterThan(readsBeforeResume));
+    expect(sends, 1);
+
+    recovered = true;
+    await tester.tap(find.text('重试'));
+    await tester.pump();
+    await tester.pump();
+    expect(find.textContaining('同步记录失败，消息处理状态尚未确认'), findsNothing);
+    expect(find.text('已发送到远程队列'), findsNothing);
+    expect(find.text('secondhello'), findsOneWidget);
+    expect(find.text('answer'), findsOneWidget);
+    expect(sends, 1);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('Codex picker keeps text chat selected when legacy terminal mode is stored',
+      (tester) async {
+    final settingsDirectory = await tester.runAsync(() async {
+      final directory =
+          await Directory.systemTemp.createTemp('ssh_tool_settings');
+      Hive.init(directory.path);
+      await Hive.openBox('settings');
+      return directory;
+    });
+    addTearDown(() async {
+      await tester.runAsync(() async {
+        await Hive.close();
+        await settingsDirectory!.delete(recursive: true);
+      });
+    });
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    await tester.pumpWidget(MaterialApp(
+      home: CodexSessionDialog(
+        defaultName: 'codex',
+        defaultWorkDir: '/p',
+        initialOpenAsChat: false,
+        loadConversations: (_) async => const [],
+        loadRecords: (_) async => const [],
+        loadDirectories: (path) async =>
+            RemoteDirectoryListing(path: path, dirs: const []),
+      ),
+    ));
+    await tester.pump();
+    expect(find.text('聊天'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('codex-open-mode')));
+    await tester.pump(const Duration(milliseconds: 300));
+    final terminalItem = tester.widget<CheckedPopupMenuItem<bool>>(
+        find.widgetWithText(CheckedPopupMenuItem<bool>, '终端'));
+    expect(terminalItem.enabled, isFalse);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 }
