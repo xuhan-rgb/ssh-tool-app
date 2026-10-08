@@ -7,6 +7,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:ssh_tool_app/services/codex_session_service.dart';
 import 'package:ssh_tool_app/screens/tmux_workspace_screen.dart';
 import 'package:ssh_tool_app/services/storage_service.dart';
+import 'package:ssh_tool_app/services/notification_service.dart';
 import 'package:ssh_tool_app/theme/app_theme.dart';
 
 void main() {
@@ -22,6 +23,56 @@ void main() {
   tearDownAll(() async {
     await Hive.close();
     await settingsDirectory.delete(recursive: true);
+  });
+
+  testWidgets('attention toggle keeps running or unread and restores the list', (tester) async {
+    tester.view.physicalSize = const Size(360, 800);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final now = DateTime.now();
+    const connection = 'attention-test';
+    await tester.runAsync(() async {
+      await StorageService.markCodexConversationViewed(connection, 'unread',
+          viewedAt: now.subtract(const Duration(days: 1)));
+      await StorageService.markCodexConversationViewed(connection, 'read', viewedAt: now);
+    });
+    final conversations = [
+      CodexConversation(id: 'running', cwd: '/project', title: '运行中的任务',
+          updatedAt: now, state: CodexConversationState.running),
+      CodexConversation(id: 'unread', cwd: '/project', title: '未读的回复',
+          updatedAt: now, state: CodexConversationState.complete),
+      CodexConversation(id: 'read', cwd: '/project', title: '已读的回复',
+          updatedAt: now.subtract(const Duration(hours: 1)), state: CodexConversationState.complete),
+      CodexConversation(id: 'imported', cwd: '/project', title: '历史记录',
+          updatedAt: now, state: CodexConversationState.complete),
+    ];
+    await tester.pumpWidget(MaterialApp(home: CodexSessionDialog(
+      connectionId: connection, defaultName: 'codex', defaultWorkDir: '/project',
+      loadConversations: (_) async => conversations,
+      loadRecords: (_) async => const [],
+      loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    final toggle = find.byKey(const ValueKey('conversation-attention-filter'));
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(find.text('运行中的任务'), findsOneWidget);
+    expect(find.text('未读的回复'), findsOneWidget);
+    expect(find.text('已读的回复'), findsNothing);
+    expect(find.text('历史记录'), findsNothing);
+    expect(tester.widget<IconButton>(toggle).isSelected, isTrue);
+    await tester.runAsync(() => NotificationService.markCodexConversationViewed(
+        connection, 'unread', viewedAt: now));
+    await tester.pump();
+    expect(find.text('未读的回复'), findsNothing);
+    await tester.tap(toggle);
+    await tester.pump();
+    expect(find.text('已读的回复'), findsOneWidget);
+    expect(find.text('历史记录'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('other-end running status contains a compact animation that disappears on completion', (tester) async {

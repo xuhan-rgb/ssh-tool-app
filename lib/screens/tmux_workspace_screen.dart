@@ -28,6 +28,7 @@ import '../widgets/codex_terminal_record.dart';
 import '../widgets/codex_goal_card.dart';
 import '../widgets/codex_question_listener.dart';
 import '../widgets/codex_model_picker.dart';
+import '../widgets/remote_status_widgets.dart';
 import 'codex_chat_screen.dart';
 import 'codex_new_conversation_screen.dart';
 import 'remote_file_preview_screen.dart';
@@ -401,6 +402,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
   bool _loadingConversations = true;
   bool _loadingOlderConversations = false;
   bool _runningOnly = false;
+  bool _attentionOnly = false;
   bool _remoteOpenOnly = false;
   Set<String> _openChatSessions = {};
   bool _loadingRemoteOpen = false;
@@ -752,6 +754,9 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
               (widget.isClaude
                   ? conversation.state == CodexConversationState.running || _isRecentCompleted(conversation)
                   : _isUnreadCompleted(conversation))) &&
+          (!_attentionOnly || favoritesOnly ||
+              conversation.state == CodexConversationState.running ||
+              _isUnreadCompleted(conversation)) &&
           (!favoritesOnly || _favoriteConversations.contains(conversation.id)))
           .toList();
 
@@ -3009,6 +3014,26 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
                 ],
               ),
             ),
+            if (!widget.isClaude && !favoritesOnly)
+              IconButton(
+                key: const ValueKey('conversation-attention-filter'),
+                tooltip: _attentionOnly
+                    ? '显示当前列表的全部对话'
+                    : '只显示运行中或未读回复',
+                isSelected: _attentionOnly,
+                color: _attentionOnly ? AppTheme.blue : AppTheme.textMuted,
+                icon: const Icon(Icons.filter_alt_outlined, size: 17),
+                selectedIcon: const Icon(Icons.filter_alt, size: 17),
+                constraints: const BoxConstraints.tightFor(width: 28, height: 36),
+                padding: EdgeInsets.zero,
+                onPressed: () => setState(() {
+                  _attentionOnly = !_attentionOnly;
+                  if (!_filteredConversations(false)
+                      .any((item) => item.id == _selectedConversationId)) {
+                    _selectedConversationId = null;
+                  }
+                }),
+              ),
             const SizedBox(width: 4),
             PopupMenuButton<_CodexTimeFilter>(
               tooltip: '按时间筛选',
@@ -3257,6 +3282,8 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
         body: SafeArea(
           child: Column(
             children: [
+              if (widget.connectionId.isNotEmpty)
+                RemoteComputerStatus(connectionId: widget.connectionId),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
                 child: Row(
@@ -3988,12 +4015,18 @@ class _CodexConversationViewerDialogState
             ),
           ],
         ),
-        Text(
-          '模型：${_selectedModel?.$1 ?? (_records.lastOrNull?.model?.isNotEmpty == true ? _records.last.model : '未知')} · 思考强度：$_reasoningEffortLabel'
-          '${_selectedModel != null && (_selectedModel!.$1 != _records.lastOrNull?.model || _selectedModel!.$2 != _records.lastOrNull?.reasoningEffort) ? ' · 下次发送生效' : ''}',
-          key: const ValueKey('viewer-reasoning-effort'),
-          style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-        ),
+        Row(children: [
+          Expanded(
+            child: Text(
+              '模型：${_selectedModel?.$1 ?? (_records.lastOrNull?.model?.isNotEmpty == true ? _records.last.model : '未知')} · 思考强度：$_reasoningEffortLabel'
+              '${_selectedModel != null && (_selectedModel!.$1 != _records.lastOrNull?.model || _selectedModel!.$2 != _records.lastOrNull?.reasoningEffort) ? ' · 下次发送生效' : ''}',
+              key: const ValueKey('viewer-reasoning-effort'),
+              style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+            ),
+          ),
+          if (!widget.isClaude && widget.connectionId.isNotEmpty)
+            CodexQuotaButton(connectionId: widget.connectionId),
+        ]),
         if (!widget.isClaude && widget.connectionId.isNotEmpty)
           CodexGoalCard(
             connectionId: widget.connectionId,

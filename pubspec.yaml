@@ -82,6 +82,7 @@ flutter:
     - assets/codex_runtime.py
     - assets/codex_chat_worker.py
     - assets/codex_terminal_session_id.py
+    - assets/remote_status.py
     - assets/codex_user_input.py
     - assets/codex_steer_message.py
 
