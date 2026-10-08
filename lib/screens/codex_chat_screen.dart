@@ -17,7 +17,6 @@ import '../widgets/chat_markdown.dart';
 import '../widgets/codex_goal_card.dart';
 import '../widgets/codex_question_listener.dart';
 import '../widgets/codex_model_picker.dart';
-import '../widgets/remote_status_widgets.dart';
 import 'remote_html_preview_screen.dart';
 import 'remote_file_preview_screen.dart';
 
@@ -1294,7 +1293,6 @@ class _CodexChatScreenState extends State<CodexChatScreen>
               ),
             ),
           ),
-          CodexQuotaButton(connectionId: widget.connection.id),
         ],
       ),
       body: Column(

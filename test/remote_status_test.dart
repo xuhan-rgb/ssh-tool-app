@@ -87,8 +87,32 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
+  testWidgets('single GPU summary shows utilization and used memory',
+      (tester) async {
+    await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+            body: RemoteComputerStatus(
+      connectionId: 'demo',
+      load: () async => ComputerStatus.fromJson({
+        'cpuPercent': 18,
+        'gpus': [
+          {
+            'name': 'GPU A',
+            'usedPercent': 35,
+            'memoryUsedMiB': 100,
+            'memoryTotalMiB': 1000
+          }
+        ],
+      }),
+    ))));
+    await tester.pump();
+    expect(find.text('CPU 18% · GPU 35% · 显存 0.1/1G'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
   testWidgets(
-      'quota loads only on tap, disables duplicate refresh and supports retry',
+      'quota displays remaining value and shares pending details request',
       (tester) async {
     var calls = 0;
     final pending = Completer<CodexQuota>();
@@ -107,8 +131,8 @@ void main() {
               }));
       },
     ))));
-    expect(calls, 0);
-    await tester.tap(find.text('额度'));
+    expect(calls, 1);
+    await tester.tap(find.byKey(const ValueKey('codex-quota-button')));
     await tester.pump();
     expect(calls, 1);
     expect(
@@ -130,6 +154,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(calls, 2);
     expect(find.text('5 小时额度 · 剩余 75%'), findsOneWidget);
+    expect(find.text('额度 75%'), findsOneWidget);
     expect(find.text('暂无法获取，请稍后刷新'), findsNothing);
     await tester.pumpWidget(const SizedBox.shrink());
   });

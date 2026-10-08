@@ -3283,9 +3283,18 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
           child: Column(
             children: [
               if (widget.connectionId.isNotEmpty)
-                RemoteComputerStatus(connectionId: widget.connectionId),
+                Row(
+                  children: [
+                    Expanded(
+                      child: RemoteComputerStatus(connectionId: widget.connectionId),
+                    ),
+                    if (!widget.isClaude)
+                      CodexQuotaButton(connectionId: widget.connectionId),
+                    const SizedBox(width: 12),
+                  ],
+                ),
               Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                padding: const EdgeInsets.symmetric(horizontal: 16),
                 child: Row(
                   children: [
                     Expanded(
@@ -4015,18 +4024,12 @@ class _CodexConversationViewerDialogState
             ),
           ],
         ),
-        Row(children: [
-          Expanded(
-            child: Text(
-              '模型：${_selectedModel?.$1 ?? (_records.lastOrNull?.model?.isNotEmpty == true ? _records.last.model : '未知')} · 思考强度：$_reasoningEffortLabel'
-              '${_selectedModel != null && (_selectedModel!.$1 != _records.lastOrNull?.model || _selectedModel!.$2 != _records.lastOrNull?.reasoningEffort) ? ' · 下次发送生效' : ''}',
-              key: const ValueKey('viewer-reasoning-effort'),
-              style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-            ),
-          ),
-          if (!widget.isClaude && widget.connectionId.isNotEmpty)
-            CodexQuotaButton(connectionId: widget.connectionId),
-        ]),
+        Text(
+          '模型：${_selectedModel?.$1 ?? (_records.lastOrNull?.model?.isNotEmpty == true ? _records.last.model : '未知')} · 思考强度：$_reasoningEffortLabel'
+          '${_selectedModel != null && (_selectedModel!.$1 != _records.lastOrNull?.model || _selectedModel!.$2 != _records.lastOrNull?.reasoningEffort) ? ' · 下次发送生效' : ''}',
+          key: const ValueKey('viewer-reasoning-effort'),
+          style: TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+        ),
         if (!widget.isClaude && widget.connectionId.isNotEmpty)
           CodexGoalCard(
             connectionId: widget.connectionId,

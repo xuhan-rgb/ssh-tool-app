@@ -25,15 +25,31 @@ def number(value):
 
 def gpu_stats():
     if shutil.which('nvidia-smi'):
-        result = subprocess.run([
-            'nvidia-smi', '--query-gpu=name,utilization.gpu,memory.used,memory.total',
-            '--format=csv,noheader,nounits'], capture_output=True, text=True,
-            timeout=4, check=True)
-        return [{'name': row[0].strip(), 'usedPercent': number(row[1]),
-                 'memoryUsedMiB': number(row[2]), 'memoryTotalMiB': number(row[3])}
-                for row in csv.reader(io.StringIO(result.stdout)) if len(row) == 4]
+        try:
+            result = subprocess.run([
+                'nvidia-smi', '--query-gpu=name,utilization.gpu,memory.used,memory.total',
+                '--format=csv,noheader,nounits'], capture_output=True, text=True,
+                timeout=4, check=True)
+            devices = [{'name': row[0].strip(), 'usedPercent': number(row[1]),
+                        'memoryUsedMiB': number(row[2]), 'memoryTotalMiB': number(row[3])}
+                       for row in csv.reader(io.StringIO(result.stdout)) if len(row) == 4]
+            if devices:
+                return devices
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return drm_stats()
+
+
+def drm_stats(root=Path('/sys/class/drm')):
+    def read_metric(path, divisor=1):
+        try:
+            value = number(path.read_text().strip())
+            return None if value is None else value / divisor
+        except OSError:
+            return None
+
     devices = []
-    for card in sorted(Path('/sys/class/drm').glob('card[0-9]*')):
+    for card in sorted(root.glob('card[0-9]*')):
         if not card.name[4:].isdigit():
             continue
         device = card / 'device'
@@ -42,9 +58,9 @@ def gpu_stats():
         busy = device / 'gpu_busy_percent'
         used, total = device / 'mem_info_vram_used', device / 'mem_info_vram_total'
         devices.append({'name': card.name,
-                        'usedPercent': number(busy.read_text().strip()) if busy.exists() else None,
-                        'memoryUsedMiB': number(used.read_text().strip()) / 1048576 if used.exists() else None,
-                        'memoryTotalMiB': number(total.read_text().strip()) / 1048576 if total.exists() else None})
+                        'usedPercent': read_metric(busy),
+                        'memoryUsedMiB': read_metric(used, 1048576),
+                        'memoryTotalMiB': read_metric(total, 1048576)})
     return devices
 
 

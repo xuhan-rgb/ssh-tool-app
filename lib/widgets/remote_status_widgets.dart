@@ -92,7 +92,7 @@ class _RemoteComputerStatusState extends State<RemoteComputerStatus>
                 ? 'GPU 未检测到'
                 : status.gpus.length > 1
                     ? 'GPU ${status.gpus.length} 张'
-                    : 'GPU ${_percent(status.gpus.first.usedPercent)}';
+                    : 'GPU ${_summaryPercent(status.gpus.first.usedPercent)} · 显存 ${_summaryMemory(status.gpus.first)}';
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 12),
       child: InkWell(
@@ -102,13 +102,11 @@ class _RemoteComputerStatusState extends State<RemoteComputerStatus>
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
           child: Row(children: [
-            const Icon(Icons.monitor_heart_outlined, size: 16),
-            const SizedBox(width: 8),
             Expanded(
                 child: Text(
               status == null
                   ? (_error ?? '正在读取电脑状态…')
-                  : 'CPU ${_percent(status.cpuPercent)} · $gpu',
+                  : 'CPU ${_summaryPercent(status.cpuPercent)} · $gpu',
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: const TextStyle(fontSize: 12),
@@ -135,33 +133,115 @@ List<Widget> _computerDetails(ComputerStatus status) => [
         ListTile(
           title: Text('GPU ${i + 1} · ${status.gpus[i].name}'),
           subtitle: Text('使用率：${_percent(status.gpus[i].usedPercent)}\n'
-              '显存：${_memory(status.gpus[i])}'),
+              '显存（已用 / 总量）：${_memory(status.gpus[i])}'),
           isThreeLine: true,
         ),
     ];
 
-String _memory(GpuStatus gpu) {
-  if (gpu.memoryUsedMiB == null || gpu.memoryTotalMiB == null) return '未知';
-  return '${gpu.memoryUsedMiB!.round()} / ${gpu.memoryTotalMiB!.round()} MiB';
+String _summaryPercent(double? value) =>
+    value == null ? '未知' : '${value.round()}%';
+
+String _summaryMemory(GpuStatus gpu) {
+  String amount(double? mib) {
+    if (mib == null) return '未知';
+    return (mib / 1024).toStringAsFixed(1).replaceFirst(RegExp(r'\.0$'), '');
+  }
+
+  return '${amount(gpu.memoryUsedMiB)}/${amount(gpu.memoryTotalMiB)}G';
 }
 
-class CodexQuotaButton extends StatelessWidget {
+String _memory(GpuStatus gpu) {
+  final used = gpu.memoryUsedMiB?.round().toString() ?? '未知';
+  final total = gpu.memoryTotalMiB?.round().toString() ?? '未知';
+  return '$used / $total MiB';
+}
+
+class CodexQuotaButton extends StatefulWidget {
   final String connectionId;
   final Future<CodexQuota> Function()? load;
 
   const CodexQuotaButton({super.key, required this.connectionId, this.load});
 
   @override
-  Widget build(BuildContext context) => TextButton(
-        key: const ValueKey('codex-quota-button'),
-        onPressed: () => _showStatusSheet<CodexQuota>(
-          context,
-          title: 'Codex 额度',
-          load: load ?? () => RemoteStatusService.quota(connectionId),
-          content: _quotaDetails,
-        ),
-        child: const Text('额度', style: TextStyle(fontSize: 12)),
-      );
+  State<CodexQuotaButton> createState() => _CodexQuotaButtonState();
+}
+
+class _CodexQuotaButtonState extends State<CodexQuotaButton>
+    with WidgetsBindingObserver {
+  CodexQuota? _quota;
+  Future<CodexQuota>? _pending;
+  Timer? _timer;
+  bool _foreground = true;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refresh();
+    _timer = Timer.periodic(const Duration(minutes: 1), (_) {
+      if (_foreground && ModalRoute.of(context)?.isCurrent != false) _refresh();
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _foreground = state == AppLifecycleState.resumed;
+    if (_foreground && ModalRoute.of(context)?.isCurrent != false) _refresh();
+  }
+
+  Future<void> _refresh() async {
+    try {
+      await _load();
+    } catch (_) {
+      // Details retain a refresh action when the account cannot be queried.
+    }
+  }
+
+  Future<CodexQuota> _load() {
+    return _pending ??= (() async {
+      try {
+        final quota = await (widget.load?.call() ??
+            RemoteStatusService.quota(widget.connectionId));
+        if (mounted) setState(() => _quota = quota);
+        return quota;
+      } catch (_) {
+        if (mounted) setState(() => _quota = null);
+        rethrow;
+      } finally {
+        _pending = null;
+      }
+    })();
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final windows = _quota?.buckets
+            .where((bucket) => bucket.name.toLowerCase() == 'codex')
+            .expand((bucket) => bucket.windows)
+            .toList() ??
+        [];
+    if (windows.isEmpty && _quota?.buckets.isNotEmpty == true) {
+      windows.addAll(_quota!.buckets.first.windows);
+    }
+    windows.sort((a, b) =>
+        (a.durationMinutes ?? 1000000).compareTo(b.durationMinutes ?? 1000000));
+    final label = windows.isEmpty
+        ? '额度 —'
+        : '额度 ${_summaryPercent(windows.first.remainingPercent)}';
+    return TextButton(
+      key: const ValueKey('codex-quota-button'),
+      onPressed: () => _showStatusSheet<CodexQuota>(context,
+          title: 'Codex 额度', load: _load, content: _quotaDetails),
+      child: Text(label, style: const TextStyle(fontSize: 12)),
+    );
+  }
 }
 
 List<Widget> _quotaDetails(CodexQuota quota) => [

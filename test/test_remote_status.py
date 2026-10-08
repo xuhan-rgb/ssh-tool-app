@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -36,6 +37,29 @@ class StatusTests(unittest.TestCase):
         self.assertEqual(result[0]['usedPercent'], 25)
         self.assertIsNone(result[1]['usedPercent'])
         self.assertEqual(result[1]['memoryTotalMiB'], 2000)
+
+    def test_nvidia_failure_falls_back_to_drm(self):
+        with patch.object(status.shutil, 'which', return_value='/bin/nvidia-smi'), \
+                patch.object(status.subprocess, 'run', side_effect=subprocess.CalledProcessError(9, 'nvidia-smi')), \
+                patch.object(status, 'drm_stats', return_value=[{'name': 'card2', 'memoryUsedMiB': None}]) as fallback:
+            result = status.gpu_stats()
+        fallback.assert_called_once()
+        self.assertEqual(result[0]['name'], 'card2')
+
+    def test_drm_memory_reports_used_and_total_independently(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            device = root / 'card0' / 'device'
+            device.mkdir(parents=True)
+            (device / 'mem_info_vram_used').write_text('104857600')
+            (device / 'mem_info_vram_total').write_text('1048576000')
+            result = status.drm_stats(root)[0]
+            self.assertEqual(result['memoryUsedMiB'], 100)
+            self.assertEqual(result['memoryTotalMiB'], 1000)
+            (device / 'mem_info_vram_used').write_text('N/A')
+            result = status.drm_stats(root)[0]
+            self.assertIsNone(result['memoryUsedMiB'])
+            self.assertEqual(result['memoryTotalMiB'], 1000)
 
 
 
