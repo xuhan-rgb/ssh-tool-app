@@ -15,6 +15,7 @@ import '../services/storage_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/chat_markdown.dart';
 import '../widgets/codex_goal_card.dart';
+import '../widgets/codex_question_listener.dart';
 import '../widgets/codex_model_picker.dart';
 import 'remote_html_preview_screen.dart';
 import 'remote_file_preview_screen.dart';
@@ -604,6 +605,11 @@ class _CodexChatScreenState extends State<CodexChatScreen>
     _refreshStream();
   }
 
+  void _onThreadReady(String threadId) {
+    if (!mounted || _threadId == threadId) return;
+    setState(() { _threadId = threadId; _forkPending = false; });
+  }
+
   void _onApproval(CodexApproval approval) {
     if (!mounted) return;
     if (_suppressedApprovalKeys.contains(_approvalKey(approval))) return;
@@ -694,6 +700,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
             onActivity: _updateActivity,
             onStartedAt: _setTurnStartedAt,
             onApproval: _onApproval,
+            onThreadReady: _onThreadReady,
           ));
       _stopElapsedTimer();
       if (!mounted) {
@@ -786,6 +793,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
             onActivity: _updateActivity,
             onStartedAt: _setTurnStartedAt,
             onApproval: _onApproval,
+            onThreadReady: _onThreadReady,
           ));
       unawaited(StorageService.setCodexConversationModel(
           _detachedConnectionId, result.threadId, (_model, _effort)));
@@ -1340,6 +1348,8 @@ class _CodexChatScreenState extends State<CodexChatScreen>
                 ],
               ),
             ),
+          if (_threadId != null && !_forkPending)
+            CodexQuestionListener(connectionId: widget.connection.id, threadId: _threadId!),
           if (_pendingApproval case final approval?)
             CodexApprovalPanel(
               key: ValueKey(

@@ -142,12 +142,13 @@ def sessions() -> None:
     print(json.dumps({"threadIds": thread_ids}, ensure_ascii=False))
 
 
-def close(thread_id: str) -> None:
+def close(thread_id: str, emit: bool = True) -> None:
     lock = worker_lock()
     try:
         file = session_file(thread_id)
         if not file.exists():
-            print(json.dumps({"closed": True, "open": False}))
+            if emit:
+                print(json.dumps({"closed": True, "open": False}))
             return
         data = json.loads(file.read_text(encoding="utf-8"))
         if not data.get("busy"):
@@ -160,7 +161,8 @@ def close(thread_id: str) -> None:
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         if not session_info(thread_id)["open"]:
-            print(json.dumps({"closed": True, "open": False}))
+            if emit:
+                print(json.dumps({"closed": True, "open": False}))
             return
         time.sleep(0.1)
     raise RuntimeError("关闭远程会话超时，请刷新状态")
@@ -169,6 +171,12 @@ def close(thread_id: str) -> None:
 def start(encoded_request: str) -> None:
     request = json.loads(base64.b64decode(encoded_request))
     job_id = request["jobId"]
+    existing_thread = request.get("threadId") if not request.get("fork") else None
+    if existing_thread and session_info(existing_thread)["open"]:
+        existing = json.loads(session_file(existing_thread).read_text(encoding="utf-8"))
+        if existing.get("interactionVersion", 0) < 1 and not existing.get("busy"):
+            # Only retire idle app-owned workers; never interrupt a running turn.
+            close(existing_thread, emit=False)
     path = job_path(job_id)
     lock = worker_lock()
     try:
@@ -303,6 +311,9 @@ def run(job_id: str) -> None:
                 if 'method' not in message or 'id' not in message:
                     return message
                 method = message['method']
+                if method == 'item/tool/requestUserInput' and prepared_runtime():
+                    # The foreground question subscriber answers on the shared connection.
+                    return {}
                 if current is None or method not in (
                         'item/commandExecution/requestApproval', 'item/fileChange/requestApproval'):
                     send({'id': message['id'], 'error': {'code': -32601,
@@ -414,7 +425,7 @@ def run(job_id: str) -> None:
             try:
                 save_json(session_path, {"threadId": thread_id, "ownerJobId": job_id,
                     "tmuxName": owner_state["tmuxName"], "queueId": queue_id,
-                    "busy": True, "activeJobId": job_id, "closeRequested": False})
+                    "busy": True, "activeJobId": job_id, "closeRequested": False, "interactionVersion": 1})
                 queue_file.write_text("", encoding="utf-8")
                 queue_file.chmod(0o600)
             finally:

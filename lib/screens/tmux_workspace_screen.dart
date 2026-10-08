@@ -26,6 +26,7 @@ import '../widgets/history_panel.dart';
 import '../widgets/chat_markdown.dart';
 import '../widgets/codex_terminal_record.dart';
 import '../widgets/codex_goal_card.dart';
+import '../widgets/codex_question_listener.dart';
 import '../widgets/codex_model_picker.dart';
 import 'codex_chat_screen.dart';
 import 'codex_new_conversation_screen.dart';
@@ -3998,6 +3999,8 @@ class _CodexConversationViewerDialogState
             connectionId: widget.connectionId,
             conversationId: widget.conversation.id,
           ),
+        if (!widget.isClaude && widget.connectionId.isNotEmpty)
+          CodexQuestionListener(connectionId: widget.connectionId, threadId: widget.conversation.id),
         if (_refreshError != null)
           Padding(
             padding: const EdgeInsets.only(bottom: 8),

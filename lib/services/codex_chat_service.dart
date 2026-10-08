@@ -344,6 +344,7 @@ print(json.dumps(jobs))
     void Function(String text)? onActivity,
     void Function(DateTime startedAt)? onStartedAt,
     void Function(CodexApproval approval)? onApproval,
+    void Function(String threadId)? onThreadReady,
   }) async {
     final progress = CodexJobProgress(
       onUpdate: onUpdate,
@@ -375,6 +376,8 @@ print(json.dumps(jobs))
                 throw CodexJobFailure(response['error'].toString());
               }
               reconnects = 0;
+              final threadId = (response['state'] as Map?)?['threadId'];
+              if (threadId is String) onThreadReady?.call(threadId);
               final approval = response['approval'];
               if (approval is Map) {
                 onApproval?.call(CodexApproval(jobId: jobId,
@@ -425,6 +428,7 @@ print(json.dumps(jobs))
     void Function(String text)? onActivity,
     void Function(DateTime startedAt)? onStartedAt,
     void Function(CodexApproval approval)? onApproval,
+    void Function(String threadId)? onThreadReady,
   }) async {
     final jobId = await _startJob(
       connectionId: connectionId,
@@ -443,6 +447,7 @@ print(json.dumps(jobs))
       onActivity: onActivity,
       onStartedAt: onStartedAt,
       onApproval: onApproval,
+      onThreadReady: onThreadReady,
     );
   }
 }
