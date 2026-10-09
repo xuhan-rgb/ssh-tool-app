@@ -60,6 +60,44 @@ void main() {
         throwsUnsupportedError);
   });
 
+  test('remote status snapshot survives failure and clears when requested',
+      () async {
+    CodexSessionService.runPythonOverride = (_, __, args) async {
+      expect(args, ['__opened__']);
+      return jsonEncode({
+        'id': 'completed', 'cwd': '/workspace',
+        'state': 'complete', 'remoteOpen': true,
+      });
+    };
+    await CodexSessionService.listRemoteOpen('one');
+    final cached = CodexSessionService.cachedRemoteOpenConversations('one')!;
+    expect(cached.single.state, CodexConversationState.complete);
+    expect(() => cached.clear(), throwsUnsupportedError);
+    expect(CodexSessionService.cachedRemoteOpenConversations('two'), isNull);
+    CodexSessionService.runPythonOverride = (_, __, ___) async =>
+        throw StateError('offline');
+    await expectLater(CodexSessionService.listRemoteOpen('one'), throwsStateError);
+    expect(CodexSessionService.cachedRemoteOpenConversations('one'), cached);
+    CodexSessionService.runPythonOverride = (_, __, ___) async => '';
+    await CodexSessionService.listRemoteOpen('one');
+    expect(CodexSessionService.cachedRemoteOpenConversations('one'), isEmpty);
+    CodexSessionService.clearCache('one');
+    expect(CodexSessionService.cachedRemoteOpenConversations('one'), isNull);
+  });
+
+  test('cleared remote snapshot is not restored by a late response', () async {
+    final pending = Completer<String>();
+    CodexSessionService.runPythonOverride = (_, __, ___) => pending.future;
+    final request = CodexSessionService.listRemoteOpen('one');
+    await Future<void>.delayed(Duration.zero);
+    CodexSessionService.clearCache('one');
+    pending.complete(jsonEncode({
+      'id': 'old', 'cwd': '/workspace', 'remoteOpen': true,
+    }));
+    await request;
+    expect(CodexSessionService.cachedRemoteOpenConversations('one'), isNull);
+  });
+
   test('inflight requests coalesce, failures retain snapshots and retry',
       () async {
     final completer = Completer<String>();
@@ -97,5 +135,28 @@ void main() {
     completer.complete(conversation('stale', 'stale'));
     await request;
     expect(CodexSessionService.cachedConversations('one'), isNull);
+  });
+  testWidgets('stalled record read times out and a fresh read can recover',
+      (tester) async {
+    CodexSessionService.runPythonOverride = (_, __, ___) async =>
+        jsonEncode({'kind': 'user', 'text': 'previous question'});
+    await CodexSessionService.readConversation('one', 'thread');
+    final stalled = Completer<String>();
+    CodexSessionService.runPythonOverride = (_, __, ___) => stalled.future;
+    final request = CodexSessionService.readConversation('one', 'thread');
+    final failure = expectLater(request, throwsA(isA<TimeoutException>()));
+    await tester.pump(const Duration(seconds: 16));
+    await failure;
+    expect(CodexSessionService.cachedRecords('one', 'thread')!.single.text,
+        'previous question');
+    CodexSessionService.runPythonOverride = (_, __, ___) async =>
+        jsonEncode({'kind': 'assistant', 'text': 'completed reply'});
+    final recovered =
+        await CodexSessionService.readConversation('one', 'thread');
+    expect(recovered.single.text, 'completed reply');
+    stalled.complete(jsonEncode({'kind': 'user', 'text': 'late stale data'}));
+    await tester.pump();
+    expect(CodexSessionService.cachedRecords('one', 'thread')!.single.text,
+        'completed reply');
   });
 }

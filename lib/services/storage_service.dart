@@ -141,6 +141,7 @@ class StorageService {
     await _settingsBox.delete(_tmuxKey(id));
     await _settingsBox.delete(_claudeEnvKey(id));
     await _settingsBox.delete(_codexTerminalCommandKey(id));
+    await invalidateCodexEnvironment(id);
     for (final kind in [
       'favorite_dirs',
       'favorite_conversations',
@@ -479,6 +480,45 @@ class StorageService {
 
   static Future<void> setHistoryViewerAsPanel(bool value) async {
     await _settingsBox.put('historyViewerAsPanel', value);
+  }
+
+  // ===== Codex 环境验证缓存（按连接存储） =====
+
+  static String _codexEnvironmentKey(String id) => 'codex_environment_v4_$id';
+
+  static String _codexEnvironmentConnection(SshConnection connection) =>
+      jsonEncode([
+        connection.host,
+        connection.port,
+        connection.username,
+        connection.updatedAt.toIso8601String(),
+      ]);
+
+  static bool isCodexEnvironmentVerified(SshConnection connection) {
+    if (!Hive.isBoxOpen(_settingsBoxName)) return false;
+    final saved = _settingsBox.get(_codexEnvironmentKey(connection.id));
+    if (saved is! Map ||
+        saved['connection'] != _codexEnvironmentConnection(connection) ||
+        saved['verifiedAt'] is! int) {
+      return false;
+    }
+    final age = DateTime.now().difference(
+        DateTime.fromMillisecondsSinceEpoch(saved['verifiedAt'] as int));
+    return !age.isNegative && age < const Duration(hours: 24);
+  }
+
+  static Future<void> markCodexEnvironmentVerified(
+      SshConnection connection) async {
+    if (!Hive.isBoxOpen(_settingsBoxName)) return;
+    await _settingsBox.put(_codexEnvironmentKey(connection.id), {
+      'connection': _codexEnvironmentConnection(connection),
+      'verifiedAt': DateTime.now().millisecondsSinceEpoch,
+    });
+  }
+
+  static Future<void> invalidateCodexEnvironment(String connectionId) async {
+    if (!Hive.isBoxOpen(_settingsBoxName)) return;
+    await _settingsBox.delete(_codexEnvironmentKey(connectionId));
   }
 
   // ===== Codex 终端启动命令（按连接存储） =====

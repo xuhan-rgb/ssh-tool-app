@@ -430,25 +430,30 @@ print(json.dumps(jobs))
     void Function(CodexApproval approval)? onApproval,
     void Function(String threadId)? onThreadReady,
   }) async {
-    final jobId = await _startJob(
-      connectionId: connectionId,
-      workDir: workDir,
-      prompt: prompt,
-      title: title ?? prompt,
-      model: model,
-      reasoningEffort: reasoningEffort,
-      threadId: threadId,
-      fork: fork,
-    );
-    return watchJob(
-      connectionId: connectionId,
-      jobId: jobId,
-      onUpdate: onUpdate,
-      onActivity: onActivity,
-      onStartedAt: onStartedAt,
-      onApproval: onApproval,
-      onThreadReady: onThreadReady,
-    );
+    try {
+      final jobId = await _startJob(
+        connectionId: connectionId,
+        workDir: workDir,
+        prompt: prompt,
+        title: title ?? prompt,
+        model: model,
+        reasoningEffort: reasoningEffort,
+        threadId: threadId,
+        fork: fork,
+      );
+      return await watchJob(
+        connectionId: connectionId,
+        jobId: jobId,
+        onUpdate: onUpdate,
+        onActivity: onActivity,
+        onStartedAt: onStartedAt,
+        onApproval: onApproval,
+        onThreadReady: onThreadReady,
+      );
+    } catch (_) {
+      await StorageService.invalidateCodexEnvironment(connectionId);
+      rethrow;
+    }
   }
 }
 

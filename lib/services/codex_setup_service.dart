@@ -93,9 +93,14 @@ class CodexSetupService {
   }
 
   static Future<CodexSetupStatus> inspect(SshConnection connection) async {
+    await StorageService.invalidateCodexEnvironment(connection.id);
     final script = await rootBundle.loadString('assets/codex_environment.sh');
-    return CodexSetupStatus.parse(
+    final status = CodexSetupStatus.parse(
         await _run(connection, _interactive(script)));
+    if (status.ready) {
+      await StorageService.markCodexEnvironmentVerified(connection);
+    }
+    return status;
   }
 
   static Future<CodexSetupStatus> prepare(SshConnection connection) async {

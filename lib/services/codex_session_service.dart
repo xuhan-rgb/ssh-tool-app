@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:collection';
 
@@ -346,10 +347,13 @@ class CodexSessionService {
       LinkedHashMap();
   static final LinkedHashMap<String, List<CodexConversation>> _runningConversationCache =
       LinkedHashMap();
+  static final LinkedHashMap<String, List<CodexConversation>> _remoteOpenConversationCache =
+      LinkedHashMap();
   static final LinkedHashMap<String, List<CodexConversationRecord>> _recordCache =
       LinkedHashMap();
   static final Map<String, Future<List<CodexConversation>>> _conversationLoads = {};
   static final Map<String, Future<List<CodexConversation>>> _runningConversationLoads = {};
+  static final Map<String, Future<List<CodexConversation>>> _remoteOpenConversationLoads = {};
   static final Map<String, Future<List<CodexConversationRecord>>> _recordLoads = {};
 
   static final Map<String, CodexPendingMessages> _pendingMessages = {};
@@ -371,6 +375,10 @@ class CodexSessionService {
           String connectionId) =>
       _runningConversationCache[connectionId];
 
+  static List<CodexConversation>? cachedRemoteOpenConversations(
+          String connectionId) =>
+      _remoteOpenConversationCache[connectionId];
+
   static List<CodexConversationRecord>? cachedRecords(
           String connectionId, String conversationId) =>
       _recordCache[_recordKey(connectionId, conversationId)];
@@ -380,17 +388,21 @@ class CodexSessionService {
     if (connectionId == null) {
       _conversationCache.clear();
       _runningConversationCache.clear();
+      _remoteOpenConversationCache.clear();
       _recordCache.clear();
       _pendingMessages.clear();
       _conversationLoads.clear();
       _runningConversationLoads.clear();
+      _remoteOpenConversationLoads.clear();
       _recordLoads.clear();
       return;
     }
     _conversationCache.remove(connectionId);
     _runningConversationCache.remove(connectionId);
+    _remoteOpenConversationCache.remove(connectionId);
     _conversationLoads.remove(connectionId);
     _runningConversationLoads.remove(connectionId);
+    _remoteOpenConversationLoads.remove(connectionId);
     final prefix = '$connectionId\u0000';
     _recordCache.removeWhere((key, _) => key.startsWith(prefix));
     _pendingMessages.removeWhere((key, _) => key.startsWith(prefix));
@@ -677,6 +689,26 @@ finally:
   }
 
   static Future<List<CodexConversation>> listRemoteOpen(String connectionId) async {
+    final existing = _remoteOpenConversationLoads[connectionId];
+    if (existing != null) return existing;
+    late final Future<List<CodexConversation>> request;
+    request = _fetchRemoteOpen(connectionId).then((value) {
+      if (identical(_remoteOpenConversationLoads[connectionId], request)) {
+        _saveSnapshot(_remoteOpenConversationCache, connectionId, value, 12);
+        _remoteOpenConversationLoads.remove(connectionId);
+      }
+      return value;
+    }, onError: (Object error, StackTrace stack) {
+      if (identical(_remoteOpenConversationLoads[connectionId], request)) {
+        _remoteOpenConversationLoads.remove(connectionId);
+      }
+      Error.throwWithStackTrace(error, stack);
+    });
+    _remoteOpenConversationLoads[connectionId] = request;
+    return request;
+  }
+
+  static Future<List<CodexConversation>> _fetchRemoteOpen(String connectionId) async {
     final raw = await _runPython(connectionId, await _listScriptWithRpc(), ['__opened__']);
     return CodexConversationParser.parse(raw)
         .where((item) => item.remoteOpen == true && !item.isSubagent)
@@ -791,9 +823,19 @@ finally:
   static Future<List<CodexConversationRecord>> _fetchConversation(
       String connectionId, String conversationId) async {
     final raw = await _recordSync.read(connectionId, conversationId,
-        (version) => _runPython(connectionId,
+        (version) async {
+      try {
+        return await _runPython(connectionId,
             ConversationSync.script(_readScript, 'codex'),
-            [conversationId, version], reuseScript: true));
+            [conversationId, version], reuseScript: true)
+            .timeout(const Duration(seconds: 15));
+      } on TimeoutException {
+        // A half-open SSH connection must not pin every subsequent refresh.
+        // Reconnect on the next read; remote tmux conversations keep running.
+        await SshService.disconnect(connectionId);
+        throw TimeoutException('读取对话记录超时，将重新连接并重试');
+      }
+    });
     return CodexConversationParser.parseRecords(raw);
   }
 

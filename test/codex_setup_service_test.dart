@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 import 'package:ssh_tool_app/models/ssh_connection.dart';
 import 'package:ssh_tool_app/services/codex_setup_service.dart';
+import 'package:ssh_tool_app/services/codex_chat_service.dart';
 import 'package:ssh_tool_app/services/storage_service.dart';
 
 void main() {
@@ -46,6 +47,51 @@ void main() {
           .entries
           .map((e) => '${e.key}\t${base64Encode(utf8.encode(e.value))}')
           .join('\n');
+
+  test('ready inspection is persisted and survives reopening settings', () async {
+    CodexSetupService.runOverride = (_, __) async => status(prepared: true);
+    await CodexSetupService.inspect(connection);
+    await Hive.box('settings').close();
+    await Hive.openBox('settings');
+    expect(StorageService.isCodexEnvironmentVerified(connection), isTrue);
+    expect(StorageService.isCodexEnvironmentVerified(
+        connection.copyWith(host: 'another-host')), isFalse);
+  });
+
+  test('verified environment expires after 24 hours', () async {
+    await StorageService.markCodexEnvironmentVerified(connection);
+    final key = 'codex_environment_v4_${connection.id}';
+    final saved = Map<String, dynamic>.from(Hive.box('settings').get(key) as Map);
+    saved['verifiedAt'] = DateTime.now().subtract(const Duration(hours: 25))
+        .millisecondsSinceEpoch;
+    await Hive.box('settings').put(key, saved);
+    expect(StorageService.isCodexEnvironmentVerified(connection), isFalse);
+  });
+
+  test('manual inspection refreshes readiness and failures invalidate it', () async {
+    var calls = 0;
+    CodexSetupService.runOverride = (_, __) async {
+      calls++;
+      return status(prepared: calls == 1);
+    };
+    await CodexSetupService.inspect(connection);
+    expect(StorageService.isCodexEnvironmentVerified(connection), isTrue);
+    await CodexSetupService.inspect(connection);
+    expect(calls, 2);
+    expect(StorageService.isCodexEnvironmentVerified(connection), isFalse);
+    await StorageService.markCodexEnvironmentVerified(connection);
+    CodexSetupService.runOverride = (_, __) async => throw StateError('offline');
+    await expectLater(CodexSetupService.inspect(connection), throwsStateError);
+    expect(StorageService.isCodexEnvironmentVerified(connection), isFalse);
+  });
+
+  test('failed chat launch invalidates the previously verified environment', () async {
+    await Hive.openBox<SshConnection>('connections');
+    await StorageService.markCodexEnvironmentVerified(connection);
+    await expectLater(CodexChatService.send(connectionId: connection.id,
+        workDir: '/project', prompt: 'hello'), throwsStateError);
+    expect(StorageService.isCodexEnvironmentVerified(connection), isFalse);
+  });
 
   test('login streams both channels before exit and decodes split UTF8', () async {
     final stdout = StreamController<List<int>>();

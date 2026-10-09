@@ -269,6 +269,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       return;
     }
 
+    _openCodexPicker(context, connection);
+  }
+
+  Future<bool> _ensureCodexReady(
+      BuildContext context, SshConnection connection) async {
+    if (StorageService.isCodexEnvironmentVerified(connection)) return true;
     CodexSetupStatus setup;
     try {
       setup = await CodexSetupService.inspect(connection);
@@ -284,12 +290,12 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           ),
         );
       }
-      return;
+      return false;
     }
-    if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) return;
+    if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) return false;
     if (!setup.ready) {
       await _openCodexSetup(context, connection);
-      if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) return;
+      if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) return false;
       try {
         setup = await CodexSetupService.inspect(connection);
       } catch (e) {
@@ -304,15 +310,16 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             ),
           );
         }
-        return;
+        return false;
       }
       if (!context.mounted ||
           ModalRoute.of(context)?.isCurrent != true ||
           !setup.ready) {
-        return;
+        return false;
       }
     }
-    _openCodexPicker(context, connection);
+    ScaffoldMessenger.of(context).clearSnackBars();
+    return true;
   }
 
   void _openCodexPicker(BuildContext context, SshConnection connection) {
@@ -321,7 +328,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       context,
       MaterialPageRoute(
         settings: const RouteSettings(name: '/assistant/codex'),
-        builder: (_) => CodexConversationPickerScreen(connection: connection),
+        builder: (_) => CodexConversationPickerScreen(
+          connection: connection,
+          ensureReady: (pickerContext) =>
+              _ensureCodexReady(pickerContext, connection),
+        ),
       ),
     );
   }

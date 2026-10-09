@@ -240,6 +240,8 @@ void main() {
     expect(scroll.position.pixels, greaterThan(0));
     expect(scroll.position.extentAfter, lessThan(80));
     expect(find.text('历史答复 39'), findsOneWidget);
+    refresh.complete(record('刷新完成'));
+    await tester.pump();
     await tester.pumpWidget(const SizedBox.shrink());
   });
 }

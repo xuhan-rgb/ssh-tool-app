@@ -554,6 +554,10 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     _directoryConversations = _conversations;
     _runningConversations = widget.isClaude ? null :
         CodexSessionService.cachedRunningConversations(widget.connectionId);
+    _remoteOpenConversations = widget.isClaude ||
+            widget.loadRemoteOpenConversations == null
+        ? null
+        : CodexSessionService.cachedRemoteOpenConversations(widget.connectionId);
     _favoriteDirectories = {...?widget.initialFavoriteDirectories,
       if (!widget.isClaude) ...StorageService.getFavoriteCodexDirectories(widget.connectionId)};
     _favoriteConversations = {...?widget.initialFavoriteConversations,
@@ -3921,6 +3925,7 @@ class _CodexConversationViewerDialogState
   }
 
   String get _viewerStateLabel {
+    if (_refreshError != null) return '同步中断，状态待确认';
     if (_pendingMessages.isNotEmpty) return '等待远程处理';
     final state = _observedState ?? widget.conversation.state;
     if (!widget.isClaude) return state.label;
@@ -3942,7 +3947,7 @@ class _CodexConversationViewerDialogState
     final running = widget.isClaude
         ? _claudeStatus?.session?.isAlive == true && _claudeStatus?.session?.status == 'busy'
         : state == CodexConversationState.running;
-    if (_logLevel != 'terminal' || !running) {
+    if (_logLevel != 'terminal' || !running || _refreshError != null) {
       return const SizedBox.shrink();
     }
     String heading = widget.isClaude ? 'Claude 正在执行' : 'Working';
@@ -4507,11 +4512,13 @@ class TmuxWorkspaceScreen extends StatefulWidget {
 class CodexConversationPickerScreen extends StatefulWidget {
   final SshConnection connection;
   final Future<void> Function()? connect;
+  final Future<bool> Function(BuildContext)? ensureReady;
 
   const CodexConversationPickerScreen({
     super.key,
     required this.connection,
     this.connect,
+    this.ensureReady,
   });
 
   @override
@@ -4522,6 +4529,7 @@ class CodexConversationPickerScreen extends StatefulWidget {
 class _CodexConversationPickerScreenState
     extends State<CodexConversationPickerScreen> {
   bool _loading = true;
+  bool _checkingEnvironment = false;
   String? _error;
 
   @override
@@ -4602,6 +4610,22 @@ class _CodexConversationPickerScreenState
 
       if (config == null) {
         Navigator.of(context).pop();
+        return;
+      }
+      // Listing and reading history do not need the interactive runtime preflight.
+      // Validate it only after the user chooses to launch a conversation.
+      setState(() {
+        _loading = true;
+        _checkingEnvironment = widget.ensureReady != null;
+      });
+      final ready = await widget.ensureReady?.call(context) ?? true;
+      if (!mounted) return;
+      setState(() => _checkingEnvironment = false);
+      if (!ready) {
+        setState(() {
+          _loading = false;
+          _error = 'Codex 环境尚未就绪，请检查环境后重试';
+        });
         return;
       }
       await ensureConnected();
@@ -4690,7 +4714,9 @@ class _CodexConversationPickerScreenState
                   CircularProgressIndicator(color: AppTheme.blue),
                   SizedBox(height: 14),
                   Text(
-                    '正在连接远程电脑…',
+                    _checkingEnvironment
+                        ? '正在检查 Codex 环境…'
+                        : '正在连接远程电脑…',
                     style: TextStyle(color: AppTheme.textMuted),
                   ),
                 ],
@@ -5515,6 +5541,9 @@ class _TmuxWorkspaceScreenState extends State<TmuxWorkspaceScreen> {
         ),
       );
     } catch (e) {
+      if (tab.type == SessionType.codex) {
+        unawaited(StorageService.invalidateCodexEnvironment(_connectionId));
+      }
       setState(() {
         tab.isConnecting = false;
         tab.errorMessage = e.toString();
