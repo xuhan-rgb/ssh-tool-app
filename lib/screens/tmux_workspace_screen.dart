@@ -432,6 +432,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
   Map<String, String> _runningChatJobs = const {};
   bool _openedSessionsKnown = false;
   bool _runningChatJobsKnown = false;
+  bool _openChatSessionsKnown = false;
   bool _hasSelectedInitialConversation = false;
   _CodexTimeFilter _timeFilter = _CodexTimeFilter.all;
 
@@ -461,10 +462,19 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
   bool _isOpenedConversation(CodexConversation conversation) =>
       _openedSessionFor(conversation) != null;
 
-  bool _isAppConversation(CodexConversation conversation) =>
-      _isOpenedConversation(conversation) ||
-      (_runningChatJobs.containsKey(conversation.id) ||
-          _openChatSessions.contains(conversation.id));
+  bool _isAppConversation(CodexConversation conversation) {
+    final originator = conversation.originator;
+    if (originator != null && originator.isNotEmpty) {
+      return originator == 'ssh_tool_app';
+    }
+    return _isOpenedConversation(conversation) ||
+        _runningChatJobs.containsKey(conversation.id) ||
+        _openChatSessions.contains(conversation.id);
+  }
+
+  bool get _conversationOwnershipKnown =>
+      _openedSessionsKnown && _runningChatJobsKnown &&
+      (widget.loadOpenChatSessions == null || _openChatSessionsKnown);
 
   bool _isRecentCompleted(CodexConversation conversation) {
     final completedAt = conversation.completedAt ?? conversation.updatedAt;
@@ -507,7 +517,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       return conversation.state.label;
     }
     if (_isAppConversation(conversation)) return '本软件执行中';
-    if (_openedSessionsKnown && _runningChatJobsKnown) return '其他端执行中';
+    if (_conversationOwnershipKnown) return '其他端执行中';
     return conversation.state.label;
   }
 
@@ -628,7 +638,10 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     if (loader == null) return;
     try {
       final sessions = await loader();
-      if (mounted) setState(() => _openChatSessions = sessions);
+      if (mounted) setState(() {
+        _openChatSessions = sessions;
+        _openChatSessionsKnown = true;
+      });
     } catch (_) {}
   }
 
@@ -742,6 +755,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
       writerLocked: conversation.writerLocked,
       remoteOpen: false,
       sharedService: conversation.sharedService,
+      originator: conversation.originator,
       directoryExists: conversation.directoryExists,
       preview: conversation.preview,
       isSubagent: conversation.isSubagent,
@@ -1976,7 +1990,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
     final closed = !widget.isClaude && conversation.remoteOpen == false;
     final stateColor = closed ? AppTheme.textMuted : _stateColor(conversation.state);
     final showExternalProgress = conversation.state == CodexConversationState.running &&
-        !closed && _openedSessionsKnown && _runningChatJobsKnown &&
+        !closed && _conversationOwnershipKnown &&
         !_isAppConversation(conversation);
     BuildContext? viewButtonContext;
     var openViewerOnTap = false;
@@ -2617,11 +2631,7 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
 
   void _selectConversation(CodexConversation conversation) {
     setState(() => _selectedConversationId = conversation.id);
-    if (_remoteOpenOnly && _openChatSessions.contains(conversation.id)) {
-      unawaited(_attachRunningChat(conversation));
-    } else {
-      unawaited(_preloadConversation(conversation.id));
-    }
+    unawaited(_preloadConversation(conversation.id));
   }
 
   Future<void> _preloadConversation(String conversationId) async {
@@ -2634,10 +2644,6 @@ class _CodexSessionDialogState extends State<CodexSessionDialog> {
 
   Future<void> _openConversationViewer(CodexConversation conversation) async {
     setState(() => _selectedConversationId = conversation.id);
-    if (_openChatSessions.contains(conversation.id)) {
-      await _attachRunningChat(conversation);
-      return;
-    }
     await showDialog<void>(
       context: context,
       builder: (_) => CodexConversationViewerDialog(

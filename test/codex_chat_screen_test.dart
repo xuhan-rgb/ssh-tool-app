@@ -426,6 +426,8 @@ void main() {
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 100));
     expect(watchedJobs, ['job-1']);
+    expect(find.descendant(of: find.byKey(const ValueKey('chat-send')),
+        matching: find.byIcon(Icons.send)), findsOneWidget);
     await tester.enterText(find.byKey(const ValueKey('chat-input')), '下一条');
     final send =
         tester.widget<IconButton>(find.byKey(const ValueKey('chat-send')));

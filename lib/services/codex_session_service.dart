@@ -62,6 +62,7 @@ class CodexConversation {
   final CodexConversationState state;
   final bool writerLocked;
   final bool sharedService;
+  final String? originator;
   /// Whether a remote Codex instance holds this conversation; null if unknown.
   final bool? remoteOpen;
   final bool directoryExists;
@@ -78,6 +79,7 @@ class CodexConversation {
     this.state = CodexConversationState.unknown,
     this.writerLocked = false,
     this.sharedService = false,
+    this.originator,
     this.remoteOpen,
     this.directoryExists = true,
     this.preview = '',
@@ -200,6 +202,7 @@ class CodexConversationParser {
             state: _parseState(json['state'] as String?),
             writerLocked: json['writerLocked'] == true,
             sharedService: json['sharedService'] == true,
+            originator: json['originator'] as String?,
             remoteOpen: json['remoteOpen'] as bool?,
             directoryExists: json['directoryExists'] != false,
             preview: (json['preview'] as String? ?? '').trim(),
@@ -1486,6 +1489,7 @@ def inspect_session(path):
                 "state": state,
                 "writerLocked": writer_locked is True,
                 "sharedService": shared_service,
+                "originator": meta.get("originator"),
                 "remoteOpen": remote_open,
                 "directoryExists": os.path.isdir(cwd),
                 "isSubagent": is_subagent,

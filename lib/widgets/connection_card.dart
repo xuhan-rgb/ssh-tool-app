@@ -8,6 +8,10 @@ enum _ConnectionCardAction { connect, disconnect, codexSetup, edit, delete }
 class ConnectionCard extends StatelessWidget {
   final SshConnection connection;
   final bool isActive;
+  final bool isConnecting;
+  final int? latencyMs;
+  final String? route;
+  final String? fallbackReason;
   final VoidCallback onTap;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
@@ -18,6 +22,10 @@ class ConnectionCard extends StatelessWidget {
     super.key,
     required this.connection,
     this.isActive = false,
+    this.isConnecting = false,
+    this.latencyMs,
+    this.route,
+    this.fallbackReason,
     required this.onTap,
     required this.onEdit,
     required this.onDelete,
@@ -37,7 +45,7 @@ class ConnectionCard extends StatelessWidget {
 
     return Card(
       child: InkWell(
-        onTap: onTap,
+        onTap: isConnecting ? null : onTap,
         onLongPress: () => _showOptions(context),
         onSecondaryTapDown: (details) =>
             _showContextMenu(context, details.globalPosition),
@@ -89,9 +97,23 @@ class ConnectionCard extends StatelessWidget {
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        if (isActive) ...[
+                        if (isConnecting) ...[
+                          const SizedBox(width: 6),
+                          _badge('正在连接…', AppTheme.blue, AppTheme.bgHover),
+                        ] else if (isActive) ...[
                           const SizedBox(width: 6),
                           _badge('● 已连接', AppTheme.green, AppTheme.greenDim),
+                          const SizedBox(width: 6),
+                          Tooltip(
+                            message: 'SSH 往返延迟',
+                            child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              Icon(Icons.signal_cellular_alt,
+                                  size: 13, color: AppTheme.textMuted),
+                              const SizedBox(width: 3),
+                              Text(latencyMs == null ? '— ms' : '$latencyMs ms',
+                                  style: TextStyle(fontSize: 11, color: AppTheme.textMuted)),
+                            ]),
+                          ),
                         ],
                       ],
                     ),
@@ -107,6 +129,15 @@ class ConnectionCard extends StatelessWidget {
                         color: AppTheme.textMuted,
                       ),
                     ),
+                    if (connection.useP2p) ...[
+                      const SizedBox(height: 3),
+                      Tooltip(
+                        message: fallbackReason ?? '通过 P2P 直接连接目标电脑',
+                        child: Text(isActive && route != null ? route! : '优先 P2P',
+                          style: TextStyle(fontSize: 11,
+                            color: route == '原连接' ? AppTheme.orange : AppTheme.textMuted)),
+                      ),
+                    ],
                     const SizedBox(height: 3),
                     // 底部信息行
                     Row(

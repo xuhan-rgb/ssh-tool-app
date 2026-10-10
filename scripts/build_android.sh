@@ -10,6 +10,8 @@ command -v docker >/dev/null 2>&1 || { echo "未找到 Docker" >&2; exit 1; }
   exit 1
 }
 
+"$project_root/scripts/build_p2p.sh"
+
 docker run --rm \
   -v "$project_root":/workspace/ssh_tool_app \
   -v "$android_home":/root/.android \

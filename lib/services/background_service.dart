@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'p2p_service.dart';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_background_service/flutter_background_service.dart';
@@ -112,6 +113,9 @@ class BackgroundService {
               'port': c.port,
               'username': c.username,
               'password': c.password,
+              'useP2p': c.useP2p,
+              'p2pOptions': c.p2pOptions,
+              'networkInterfaces': P2pService.lastInterfaces,
             })
         .toList();
     FlutterBackgroundService().invoke('setConnections', {
@@ -148,6 +152,16 @@ class BackgroundService {
         nextConfigs[id] = map;
       }
 
+      for (final id in nextIds) {
+        final previous = _connectionConfigs[id];
+        final next = nextConfigs[id]!;
+        if (previous != null &&
+            (previous['useP2p'] == true || next['useP2p'] == true) &&
+            (previous['useP2p'] != next['useP2p'] ||
+                jsonEncode(previous['p2pOptions']) != jsonEncode(next['p2pOptions']))) {
+          _clients.remove(id)?.close();
+        }
+      }
       _connectionConfigs
         ..clear()
         ..addAll(nextConfigs);
@@ -326,13 +340,17 @@ class BackgroundService {
     }
 
     try {
-      final socket = await SSHSocket.connect(
-        host,
-        port,
-        timeout: const Duration(seconds: 20),
+      final endpoint = await P2pService.resolveConfig(
+        connectionId, host, port,
+        username: username, password: password,
+        useP2p: config['useP2p'] == true,
+        options: (config['p2pOptions'] as Map?)?.cast<String, dynamic>(),
+        networkInterfaces: (config['networkInterfaces'] as List?)
+            ?.map((item) => Map<String, dynamic>.from(item as Map)).toList(),
       );
-      final client = SSHClient(
-        socket,
+      final client = endpoint.authenticatedClient ?? SSHClient(
+        await SSHSocket.connect(endpoint.host, endpoint.port,
+            timeout: const Duration(seconds: 20)),
         username: username,
         onPasswordRequest: () => password,
       );

@@ -771,6 +771,7 @@ void main() {
               'id': childId,
               'cwd': codexHome.path,
               'thread_source': 'subagent',
+              'originator': 'codex-tui',
               'parent_thread_id': 'parent-thread-id',
               'source': {
                 'subagent': {
@@ -798,6 +799,7 @@ void main() {
           CodexConversationParser.parse(result.stdout as String);
       final child = conversations.singleWhere((item) => item.id == childId);
       expect(child.isSubagent, isTrue);
+      expect(child.originator, 'codex-tui');
       expect(child.parentConversationId, 'parent-thread-id');
       expect(child.canResume, isFalse);
       expect(child.canTakeover, isFalse);

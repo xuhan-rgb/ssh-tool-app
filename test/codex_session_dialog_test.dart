@@ -414,41 +414,51 @@ void main() {
     });
   }
 
-  testWidgets('idle owned remote session opens chat without takeover', (tester) async {
-    tester.view.physicalSize = const Size(390, 844);
-    tester.view.devicePixelRatio = 1;
-    addTearDown(tester.view.resetPhysicalSize);
-    addTearDown(tester.view.resetDevicePixelRatio);
-    CodexSessionConfig? result;
-    const conversation = CodexConversation(
-      id: 'owned-idle', cwd: '/project', updatedAt: null,
-      title: '手机创建的空闲对话', state: CodexConversationState.complete,
-      remoteOpen: true, writerLocked: true,
-    );
-    await tester.pumpWidget(MaterialApp(home: Builder(builder: (context) =>
-      Scaffold(body: TextButton(onPressed: () async {
-        result = await showDialog<CodexSessionConfig>(context: context,
-          builder: (_) => CodexSessionDialog(
-            defaultName: 'codex', defaultWorkDir: '/project',
-            loadConversations: (_) async => const [conversation],
-            loadRemoteOpenConversations: () async => const [conversation],
-            loadOpenChatSessions: () async => {'owned-idle'},
-            loadRunningChatJobs: () async => {},
-            loadRecords: (_) async => const [],
-            loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
-          ));
-      }, child: const Text('选择对话'))))));
-    await tester.tap(find.text('选择对话'));
-    await tester.pumpAndSettle();
-    expect(find.text('等待消息'), findsOneWidget);
-    expect(find.text('需接管'), findsNothing);
-    await tester.tap(find.text('手机创建的空闲对话'));
-    await tester.pumpAndSettle();
-    expect(result?.resumeConversation?.id, 'owned-idle');
-    expect(result?.openAsChat, isTrue);
-    expect(result?.stopWriterBeforeLaunch, isFalse);
-    expect(tester.takeException(), isNull);
-  });
+  for (final state in [CodexConversationState.complete, CodexConversationState.running]) {
+    testWidgets('owned remote ${state.name} session opens the same viewer without takeover', (tester) async {
+      tester.view.physicalSize = const Size(390, 844);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      CodexSessionConfig? result;
+      final conversation = CodexConversation(
+        id: 'owned-idle', cwd: '/project', updatedAt: null,
+        title: '手机创建的对话', state: state,
+        remoteOpen: true, writerLocked: true,
+      );
+      await tester.pumpWidget(MaterialApp(home: Builder(builder: (context) =>
+        Scaffold(body: TextButton(onPressed: () async {
+          result = await showDialog<CodexSessionConfig>(context: context,
+            builder: (_) => CodexSessionDialog(
+              defaultName: 'codex', defaultWorkDir: '/project',
+              connectionId: 'owned-viewer-test',
+              loadConversations: (_) async => [conversation],
+              loadRemoteOpenConversations: () async => [conversation],
+              loadOpenChatSessions: () async => {'owned-idle'},
+              loadRunningChatJobs: () async => {},
+              loadRecords: (_) async => const [],
+              loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
+            ));
+        }, child: const Text('选择对话'))))));
+      await tester.tap(find.text('选择对话'));
+      await tester.pumpAndSettle();
+      expect(find.text('需接管'), findsNothing);
+      await tester.tap(find.text('手机创建的对话'));
+      await tester.pumpAndSettle();
+      expect(result, isNull);
+      await tester.tap(find.byKey(const ValueKey('view-conversation-owned-idle')));
+      await tester.pumpAndSettle();
+      expect(find.byType(CodexConversationViewerDialog), findsOneWidget);
+      expect(find.byKey(const ValueKey('viewer-log-toggle')), findsOneWidget);
+      expect(find.byKey(const ValueKey('viewer-conversation-options')), findsOneWidget);
+      expect(find.byKey(const ValueKey('viewer-send-message')), findsOneWidget);
+      expect(find.descendant(of: find.byKey(const ValueKey('viewer-send-message')),
+          matching: find.byIcon(Icons.send)), findsOneWidget);
+      expect(result, isNull);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    });
+  }
 
   testWidgets('completed remote session turns gray after it closes', (tester) async {
     tester.view.physicalSize = const Size(390, 844);
@@ -1393,6 +1403,80 @@ void main() {
     await tester.pump(const Duration(seconds: 5));
     expect(loadCount, 3);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('waits for open app sessions before identifying an external task',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    final sessions = Completer<Set<String>>();
+    await tester.pumpWidget(MaterialApp(home: CodexSessionDialog(
+      defaultName: 'codex',
+      defaultWorkDir: '/project',
+      loadConversations: (_) async => [CodexConversation(
+        id: 'loading-owner', cwd: '/project', title: '归属加载中的任务',
+        updatedAt: null, state: CodexConversationState.running,
+      )],
+      loadOpenedSessions: () async => const [],
+      loadRunningChatJobs: () async => const {},
+      loadOpenChatSessions: () => sessions.future,
+      loadRecords: (_) async => const [],
+      loadDirectories: (_) async => const RemoteDirectoryListing(
+        path: '/project', dirs: [],
+      ),
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    final badge = find.byKey(const ValueKey('conversation-state-loading-owner'));
+    expect(find.descendant(of: badge, matching: find.text('正在执行')),
+        findsOneWidget);
+    expect(find.text('其他端执行中'), findsNothing);
+    sessions.complete({'loading-owner'});
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.descendant(of: badge, matching: find.text('本软件执行中')),
+        findsOneWidget);
+    expect(find.text('其他端执行中'), findsNothing);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('phone tracking does not change a computer-created conversation origin',
+      (tester) async {
+    tester.view.physicalSize = const Size(390, 844);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    var tracked = false;
+    await tester.pumpWidget(MaterialApp(home: CodexSessionDialog(
+      defaultName: 'codex', defaultWorkDir: '/project',
+      loadConversations: (_) async => [
+        const CodexConversation(id: 'computer-origin', cwd: '/project',
+            title: '电脑创建的对话', updatedAt: null,
+            state: CodexConversationState.running, originator: 'codex-tui'),
+        const CodexConversation(id: 'phone-origin', cwd: '/project',
+            title: '手机创建的对话', updatedAt: null,
+            state: CodexConversationState.running, originator: 'ssh_tool_app'),
+      ],
+      loadOpenedSessions: () async => const [],
+      loadOpenChatSessions: () async => tracked ? {'computer-origin'} : {},
+      loadRunningChatJobs: () async => tracked ? {'computer-origin': 'phone-job'} : {},
+      loadRecords: (_) async => const [],
+      loadDirectories: (_) async => const RemoteDirectoryListing(path: '/project', dirs: []),
+    )));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 100));
+    Finder badge(String id, String label) => find.descendant(
+        of: find.byKey(ValueKey('conversation-state-$id')),
+        matching: find.text(label));
+    expect(badge('computer-origin', '其他端执行中'), findsOneWidget);
+    tracked = true;
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(badge('computer-origin', '其他端执行中'), findsOneWidget);
+    expect(badge('phone-origin', '本软件执行中'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
   });
 
   testWidgets('distinguishes app jobs from other running conversations',

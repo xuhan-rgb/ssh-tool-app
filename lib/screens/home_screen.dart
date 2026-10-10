@@ -1,3 +1,4 @@
+import '../services/p2p_service.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -27,6 +28,9 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   final CodexPreloadService _preloader = CodexPreloadService();
   Timer? _preloadTimer;
   bool _preloadInProgress = false;
+  String? _connectingId;
+  final Map<String, int?> _latencies = {};
+  bool _latencyRefreshInProgress = false;
   late String _assistant;
 
   @override
@@ -34,16 +38,52 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     super.initState();
     _assistant = StorageService.getHomeAssistant();
     WidgetsBinding.instance.addObserver(this);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _preloadIfVisible());
+    SshService.activeSessionsNotifier.addListener(_refreshLatencies);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _preloadIfVisible();
+      _refreshLatencies();
+    });
     _preloadTimer = Timer.periodic(
       const Duration(seconds: 30),
-      (_) => _preloadIfVisible(),
+      (_) {
+        _preloadIfVisible();
+        _refreshLatencies();
+      },
     );
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed) _preloadIfVisible();
+    if (state == AppLifecycleState.resumed) {
+      _preloadIfVisible();
+      _refreshLatencies();
+    }
+  }
+
+  Future<void> _refreshLatencies() async {
+    if (!mounted || _latencyRefreshInProgress ||
+        WidgetsBinding.instance.lifecycleState != AppLifecycleState.resumed ||
+        ModalRoute.of(context)?.isCurrent == false) {
+      return;
+    }
+    _latencyRefreshInProgress = true;
+    try {
+      final ids = Hive.box<SshConnection>('connections').values
+          .map((connection) => connection.id)
+          .where((id) => SshService.getClient(id) != null).toList();
+      final results = await Future.wait(ids.map(SshService.measureLatency));
+      if (!mounted) return;
+      setState(() {
+        _latencies.clear();
+        for (var i = 0; i < ids.length; i++) {
+          if (SshService.getClient(ids[i]) != null) {
+            _latencies[ids[i]] = results[i];
+          }
+        }
+      });
+    } finally {
+      _latencyRefreshInProgress = false;
+    }
   }
 
   Future<void> _preloadIfVisible() async {
@@ -68,6 +108,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    SshService.activeSessionsNotifier.removeListener(_refreshLatencies);
     _preloadTimer?.cancel();
     super.dispose();
   }
@@ -176,6 +217,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                   return ConnectionCard(
                     connection: connection,
                     isActive: isActive,
+                    isConnecting: _connectingId == connection.id,
+                    latencyMs: _latencies[connection.id],
+                    route: P2pService.endpoints[connection.id]?.route,
+                    fallbackReason: P2pService.endpoints[connection.id]?.fallbackReason,
                     onTap: () => _connectToServer(context, connection),
                     onEdit: () => _editConnection(context, connection),
                     onDelete: () => _deleteConnection(context, connection),
@@ -254,11 +299,33 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   }
 
   Future<void> _connectToServer(BuildContext context, SshConnection connection) async {
+    if (_connectingId != null) return;
+    final assistant = _assistant;
+    ScaffoldMessenger.of(context).clearSnackBars();
+    setState(() => _connectingId = connection.id);
+    try {
+      await SshService.connectClient(connection);
+    } catch (error) {
+      if (context.mounted && ModalRoute.of(context)?.isCurrent == true) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(SshService.connectionErrorMessage(error)),
+          duration: const Duration(seconds: 8),
+          action: SnackBarAction(
+            label: '编辑连接',
+            onPressed: () => _editConnection(context, connection),
+          ),
+        ));
+      }
+      return;
+    } finally {
+      if (mounted) setState(() => _connectingId = null);
+    }
+    if (!context.mounted || ModalRoute.of(context)?.isCurrent != true) return;
     // 设置待跳转连接，供通知点击回调使用
     MyApp.pendingConnection = connection;
     MyApp.pendingSessionName = null;
 
-    if (_assistant == 'claude') {
+    if (assistant == 'claude') {
       Navigator.push(
         context,
         MaterialPageRoute(

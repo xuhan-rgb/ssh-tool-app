@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../models/ssh_connection.dart';
 import '../services/storage_service.dart';
+import '../services/ssh_service.dart';
 import '../theme/app_theme.dart';
 
 class ConnectionFormScreen extends StatefulWidget {
@@ -23,6 +24,8 @@ class _ConnectionFormScreenState extends State<ConnectionFormScreen> {
   late TextEditingController _claudeEnvController;
   late TextEditingController _codexTerminalCommandController;
 
+  bool _useP2p = false;
+  bool _allowRelayFallback = true;
   bool _usePrivateKey = false;
   bool _obscurePassword = true;
   bool get _showClaudeEnvConfig =>
@@ -44,6 +47,9 @@ class _ConnectionFormScreenState extends State<ConnectionFormScreen> {
       text: conn == null ? '' : StorageService.getCodexTerminalCommand(conn.id),
     );
     _usePrivateKey = conn?.usePrivateKey ?? false;
+    _useP2p = conn?.useP2p ?? false;
+    final options = conn?.p2pOptions ?? const <String, dynamic>{};
+    _allowRelayFallback = options['allowRelayFallback'] != false;
   }
 
   @override
@@ -85,10 +91,21 @@ class _ConnectionFormScreenState extends State<ConnectionFormScreen> {
             ),
             const SizedBox(height: 16),
 
+            DropdownButtonFormField<bool>(
+              initialValue: _useP2p,
+              decoration: const InputDecoration(labelText: '连接方式'),
+              items: const [
+                DropdownMenuItem(value: false, child: Text('普通 SSH')),
+                DropdownMenuItem(value: true, child: Text('自动 P2P（免配置）')),
+              ],
+              onChanged: (value) => setState(() => _useP2p = value ?? false),
+            ),
+            const SizedBox(height: 16),
+            if (_useP2p) ..._buildP2pOptions(),
             TextFormField(
               controller: _hostController,
               style: const TextStyle(fontFamily: 'monospace'),
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: '主机地址',
                 hintText: '例如: 192.168.1.100',
                 prefixIcon: Icon(Icons.dns),
@@ -103,7 +120,7 @@ class _ConnectionFormScreenState extends State<ConnectionFormScreen> {
             TextFormField(
               controller: _portController,
               style: const TextStyle(fontFamily: 'monospace'),
-              decoration: const InputDecoration(
+              decoration: InputDecoration(
                 labelText: '端口',
                 hintText: '默认: 22',
                 prefixIcon: Icon(Icons.numbers),
@@ -275,6 +292,23 @@ class _ConnectionFormScreenState extends State<ConnectionFormScreen> {
     );
   }
 
+  Map<String, dynamic> get _p2pOptions => {
+    'allowRelayFallback': _allowRelayFallback,
+  };
+
+  List<Widget> _buildP2pOptions() => [
+    const Text('使用原 SSH 连接自动准备 P2P。首次连接会在 Linux 电脑上'
+        '自动放置并启动本 App 的辅助程序，无需手动配置。'),
+    SwitchListTile(
+      contentPadding: EdgeInsets.zero,
+      title: const Text('直连失败时保留原连接'),
+      subtitle: const Text('关闭后，只允许 P2P 直连；失败时留在首页提示原因。'),
+      value: _allowRelayFallback,
+      onChanged: (value) => setState(() => _allowRelayFallback = value),
+    ),
+    const SizedBox(height: 16),
+  ];
+
   Future<void> _saveConnection() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -306,8 +340,18 @@ class _ConnectionFormScreenState extends State<ConnectionFormScreen> {
           username: username,
           password: password,
           useTmux: true,
+          useP2p: _useP2p,
+          p2pOptions: _p2pOptions,
         );
         await StorageService.updateConnection(updated);
+        final previous = widget.connection!;
+        if (previous.useP2p != updated.useP2p ||
+            (updated.useP2p && !mapEquals(previous.p2pOptions, updated.p2pOptions))) {
+          for (final id in SshService.getActiveSessions().where(
+              (id) => id == updated.id || id.startsWith('${updated.id}:')).toList()) {
+            await SshService.disconnect(id);
+          }
+        }
         connectionId = updated.id;
       } else {
         final connection = SshConnection.create(
@@ -317,6 +361,8 @@ class _ConnectionFormScreenState extends State<ConnectionFormScreen> {
           username: username,
           password: password,
           useTmux: true,
+          useP2p: _useP2p,
+          p2pOptions: _p2pOptions,
         );
         await StorageService.saveConnection(connection);
         connectionId = connection.id;

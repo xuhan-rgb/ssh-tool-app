@@ -1557,7 +1557,7 @@ class _CodexChatScreenState extends State<CodexChatScreen>
                 IconButton.filled(
                   key: const ValueKey('chat-send'),
                   onPressed: _readOnlyReason != null || _closingRemoteSession ? null : _send,
-                  icon: Icon(_sending ? Icons.queue : Icons.send),
+                  icon: const Icon(Icons.send),
                   tooltip: _sending ? '加入待发送队列' : '发送',
                 ),
               ],

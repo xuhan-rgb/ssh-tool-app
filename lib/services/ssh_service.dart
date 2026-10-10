@@ -1,3 +1,4 @@
+import 'p2p_service.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -126,6 +127,23 @@ class TerminalSession {
 }
 
 class SshService {
+  static String connectionErrorMessage(Object error) {
+    if (error is SSHAuthFailError) {
+      return '认证失败：用户名或密码错误，请检查后重试';
+    }
+    if (error is TimeoutException) {
+      return '连接超时：请检查电脑是否在线以及网络是否可达';
+    }
+    if (error is SocketException) {
+      return '网络连接失败：请检查电脑地址、端口和网络连接';
+    }
+    if (error is SSHAuthAbortError) {
+      return '认证中断：连接被关闭或超时，请重试';
+    }
+    final message = error.toString().replaceFirst(RegExp(r'^Exception: '), '');
+    return message;
+  }
+
   static final Map<String, TerminalSession> _activeSessions = {};
   static final Map<String, Future<TerminalSession>> _clientConnections = {};
 
@@ -197,20 +215,16 @@ class SshService {
     try {
       final session = TerminalSession(id);
 
-      final socket = await SSHSocket.connect(
-        config.host,
-        config.port,
-        timeout: const Duration(seconds: 30),
-      );
-
-      client = SSHClient(
-        socket,
+      final endpoint = await P2pService.resolve(config);
+      client = endpoint.authenticatedClient ?? SSHClient(
+        await SSHSocket.connect(endpoint.host, endpoint.port,
+            timeout: const Duration(seconds: 30)),
         username: config.username,
         onPasswordRequest: () => config.password ?? '',
       );
 
       // 等待认证完成
-      await client.authenticated;
+      await client.authenticated.timeout(const Duration(seconds: 30));
 
       session.client = client;
       session.isConnected = true;
@@ -222,7 +236,7 @@ class SshService {
     } on TimeoutException {
       throw Exception('连接超时: 请检查网络或服务器是否可达');
     } on SSHAuthFailError {
-      throw Exception('认证失败: 用户名或密码错误');
+      throw Exception('认证失败：用户名或密码错误，请检查后重试');
     } on SSHAuthAbortError {
       rethrow;
     } catch (e) {
@@ -252,14 +266,10 @@ class SshService {
       final session = TerminalSession(id);
 
       // 建立SSH连接（30秒超时）
-      final socket = await SSHSocket.connect(
-        config.host,
-        config.port,
-        timeout: const Duration(seconds: 30),
-      );
-
-      final client = SSHClient(
-        socket,
+      final endpoint = await P2pService.resolve(config);
+      final client = endpoint.authenticatedClient ?? SSHClient(
+        await SSHSocket.connect(endpoint.host, endpoint.port,
+            timeout: const Duration(seconds: 30)),
         username: config.username,
         onPasswordRequest: () => config.password ?? '',
         // TODO: 添加私钥认证支持
@@ -348,6 +358,10 @@ class SshService {
       session.isConnected = false;
       session.dispose();
       _activeSessions.remove(connectionId);
+      final baseId = connectionId.split(':').first;
+      if (!_activeSessions.keys.any((id) => id == baseId || id.startsWith('$baseId:'))) {
+        await P2pService.stop(baseId);
+      }
       _notifyActiveSessionsChanged();
     }
   }
@@ -462,6 +476,19 @@ class SshService {
       }
     }
     return null;
+  }
+
+  /// 通过现有 SSH 连接的 keepalive 请求测量往返延迟，不创建新连接。
+  static Future<int?> measureLatency(String connectionId) async {
+    final client = getClient(connectionId);
+    if (client == null) return null;
+    final stopwatch = Stopwatch()..start();
+    try {
+      await client.ping().timeout(const Duration(seconds: 5));
+      return stopwatch.elapsedMilliseconds;
+    } catch (_) {
+      return null;
+    }
   }
 
   // 检查连接状态

@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
+import 'package:dartssh2/dartssh2.dart';
 import 'package:ssh_tool_app/models/ssh_connection.dart';
 import 'package:ssh_tool_app/screens/home_screen.dart';
 import 'package:ssh_tool_app/screens/tmux_workspace_screen.dart';
@@ -146,7 +147,7 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('cached list appears while the SSH connection is pending',
+  testWidgets('stays on home while SSH is pending, then opens the cached list',
       (tester) async {
     CodexSetupService.runOverride = (_, __) => Completer<String>().future;
     CodexSessionService.runPythonOverride = (_, __, ___) async => jsonEncode({
@@ -157,14 +158,64 @@ void main() {
           'remoteOpen': true,
         });
     await tester.runAsync(() => CodexSessionService.listAll(connection.id));
-    SshService.connectClientOverride =
-        (_) => Completer<TerminalSession>().future;
+    final connecting = Completer<TerminalSession>();
+    var attempts = 0;
+    SshService.connectClientOverride = (_) {
+      attempts++;
+      return connecting.future;
+    };
     await launch(tester);
     await tester.tap(find.text('Recovery host'));
     await tester.pump();
     await tester.pump(const Duration(milliseconds: 350));
+    expect(find.text('Already loaded conversation'), findsNothing);
+    expect(find.text('正在连接…'), findsOneWidget);
+    expect(find.text('>_ SSH 终端'), findsOneWidget);
+    await tester.tap(find.text('Recovery host'));
+    expect(attempts, 1);
+    connecting.complete(TerminalSession(connection.id));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 350));
     expect(find.text('Already loaded conversation'), findsOneWidget);
     await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets('rejected credentials stay on home and offer editing',
+      (tester) async {
+    SshService.connectClientOverride = (_) async =>
+        throw SSHAuthFailError('All authentication methods failed');
+    await launch(tester);
+    await tester.tap(find.text('Recovery host'));
+    await tester.pumpAndSettle();
+    expect(find.text('>_ SSH 终端'), findsOneWidget);
+    expect(find.text('选择 Codex 对话'), findsNothing);
+    expect(find.textContaining('用户名或密码错误'), findsOneWidget);
+    expect(find.text('编辑连接'), findsOneWidget);
+    expect(find.text('正在连接…'), findsNothing);
+  });
+
+  testWidgets('unreachable host stays on home with a network error',
+      (tester) async {
+    SshService.connectClientOverride = (_) async =>
+        throw const SocketException('Network is unreachable');
+    await launch(tester);
+    await tester.tap(find.text('Recovery host'));
+    await tester.pumpAndSettle();
+    expect(find.text('>_ SSH 终端'), findsOneWidget);
+    expect(find.text('选择 Codex 对话'), findsNothing);
+    expect(find.textContaining('网络连接失败'), findsOneWidget);
+  });
+
+  testWidgets('timeout stays on home with an explicit timeout message',
+      (tester) async {
+    SshService.connectClientOverride = (_) async =>
+        throw TimeoutException('connection timed out');
+    await launch(tester);
+    await tester.tap(find.text('Recovery host'));
+    await tester.pumpAndSettle();
+    expect(find.text('>_ SSH 终端'), findsOneWidget);
+    expect(find.text('选择 Codex 对话'), findsNothing);
+    expect(find.textContaining('连接超时'), findsOneWidget);
   });
 
   testWidgets('returning and reopening never repeats the environment preflight',

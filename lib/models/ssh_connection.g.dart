@@ -29,13 +29,15 @@ class SshConnectionAdapter extends TypeAdapter<SshConnection> {
       updatedAt: fields[9] as DateTime,
       terminalColor: fields[10] as int?,
       useTmux: fields[11] == null ? false : fields[11] as bool,
+      useP2p: fields[12] == null ? false : fields[12] as bool,
+      p2pOptions: (fields[13] as Map?)?.cast<String, dynamic>(),
     );
   }
 
   @override
   void write(BinaryWriter writer, SshConnection obj) {
     writer
-      ..writeByte(12)
+      ..writeByte(14)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -59,7 +61,11 @@ class SshConnectionAdapter extends TypeAdapter<SshConnection> {
       ..writeByte(10)
       ..write(obj.terminalColor)
       ..writeByte(11)
-      ..write(obj.useTmux);
+      ..write(obj.useTmux)
+      ..writeByte(12)
+      ..write(obj.useP2p)
+      ..writeByte(13)
+      ..write(obj.p2pOptions);
   }
 
   @override

@@ -40,6 +40,12 @@ class SshConnection extends HiveObject {
   @HiveField(11, defaultValue: false)
   bool useTmux;
 
+  @HiveField(12, defaultValue: false)
+  bool useP2p;
+
+  @HiveField(13)
+  Map<String, dynamic>? p2pOptions;
+
   SshConnection({
     required this.id,
     required this.name,
@@ -53,6 +59,8 @@ class SshConnection extends HiveObject {
     required this.updatedAt,
     this.terminalColor,
     this.useTmux = false,
+    this.useP2p = false,
+    this.p2pOptions,
   });
 
   // 工厂方法：创建新连接
@@ -66,6 +74,8 @@ class SshConnection extends HiveObject {
     String? passphrase,
     int? terminalColor,
     bool useTmux = false,
+    bool useP2p = false,
+    Map<String, dynamic>? p2pOptions,
   }) {
     final now = DateTime.now();
     return SshConnection(
@@ -81,6 +91,8 @@ class SshConnection extends HiveObject {
       updatedAt: now,
       terminalColor: terminalColor,
       useTmux: useTmux,
+      useP2p: useP2p,
+      p2pOptions: p2pOptions,
     );
   }
 
@@ -95,6 +107,8 @@ class SshConnection extends HiveObject {
     String? passphrase,
     int? terminalColor,
     bool? useTmux,
+    bool? useP2p,
+    Map<String, dynamic>? p2pOptions,
   }) {
     return SshConnection(
       id: id,
@@ -109,6 +123,8 @@ class SshConnection extends HiveObject {
       updatedAt: DateTime.now(),
       terminalColor: terminalColor ?? this.terminalColor,
       useTmux: useTmux ?? this.useTmux,
+      useP2p: useP2p ?? this.useP2p,
+      p2pOptions: p2pOptions ?? this.p2pOptions,
     );
   }
 
