@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:async';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
@@ -24,6 +25,31 @@ void main() {
     P2pService.diagnostics.clear();
     P2pService.lastInterfaces = null;
   });
+  test('identical concurrent requests share a single P2P startup', () async {
+    final c = connection();
+    final pending = Completer<int>();
+    var starts = 0;
+    P2pService.startOverride = (_) { starts++; return pending.future; };
+    final first = P2pService.resolve(c);
+    final second = P2pService.resolve(c);
+    pending.complete(45678);
+    final endpoints = await Future.wait([first, second]);
+    expect(starts, 1);
+    expect(endpoints.first, same(endpoints.last));
+  });
+
+  test('failed startup does not prevent a later retry', () async {
+    final c = connection(options: {'allowRelayFallback': false});
+    var starts = 0;
+    P2pService.startOverride = (_) async {
+      if (++starts == 1) throw Exception('test failure');
+      return 45678;
+    };
+    await expectLater(P2pService.resolve(c), throwsException);
+    expect((await P2pService.resolve(c)).route, 'P2P');
+    expect(starts, 2);
+  });
+
   test('ordinary SSH preserves address without starting a helper', () async {
     P2pService.startOverride = (_) async => throw StateError('unexpected');
     final endpoint = await P2pService.resolve(connection(p2p: false));

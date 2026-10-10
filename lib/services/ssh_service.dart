@@ -223,6 +223,9 @@ class SshService {
         onPasswordRequest: () => config.password ?? '',
       );
 
+      P2pService.reportProgress(id, endpoint.route == 'P2P'
+          ? 'P2P 通道已建立，正在验证 SSH 会话…'
+          : '正在验证 SSH 会话…');
       // 等待认证完成
       await client.authenticated.timeout(const Duration(seconds: 30));
 

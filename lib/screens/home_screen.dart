@@ -39,6 +39,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     _assistant = StorageService.getHomeAssistant();
     WidgetsBinding.instance.addObserver(this);
     SshService.activeSessionsNotifier.addListener(_refreshLatencies);
+    P2pService.progressNotifier.addListener(_refreshConnectionProgress);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _preloadIfVisible();
       _refreshLatencies();
@@ -105,10 +106,15 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     }
   }
 
+  void _refreshConnectionProgress() {
+    if (mounted && _connectingId != null) setState(() {});
+  }
+
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     SshService.activeSessionsNotifier.removeListener(_refreshLatencies);
+    P2pService.progressNotifier.removeListener(_refreshConnectionProgress);
     _preloadTimer?.cancel();
     super.dispose();
   }
@@ -218,6 +224,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
                     connection: connection,
                     isActive: isActive,
                     isConnecting: _connectingId == connection.id,
+                    connectionProgress: P2pService.progressNotifier.value[connection.id],
                     latencyMs: _latencies[connection.id],
                     route: P2pService.endpoints[connection.id]?.route,
                     fallbackReason: P2pService.endpoints[connection.id]?.fallbackReason,
@@ -302,6 +309,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     if (_connectingId != null) return;
     final assistant = _assistant;
     ScaffoldMessenger.of(context).clearSnackBars();
+    P2pService.reportProgress(connection.id, '正在建立 SSH 连接…');
     setState(() => _connectingId = connection.id);
     try {
       await SshService.connectClient(connection);

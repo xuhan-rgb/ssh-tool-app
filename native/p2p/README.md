@@ -30,6 +30,27 @@ alive, while direct SSH data goes over the P2P transport. App disconnect closes
 the command and the native peer once no local session needs that connection.
 The helper file remains available for the next connection.
 
+Connection configurations that reach the same computer and Unix account reuse
+the same verified helper file, even when their original SSH addresses differ
+(for example, Tailscale and an FRP forwarding address). A matching helper in
+the account's home directory skips SFTP setup; a missing or different helper
+uses the upload path. Different connection IDs still create separate helper
+processes and ICE peers; they do not share one UDP socket. TCP streams within
+one peer reuse its reliable data-channel transport. Identical concurrent setup
+requests in the same Dart isolate share a startup, and completed or failed
+requests are removed so later requests can retry.
+
+For public IPv4 UDP reflexive candidates, both peers also try at most 32
+subsequent ports. This addresses networks that assign a nearby different port
+for the peer than for the STUN server. Original candidates remain available,
+and every predicted path must pass ICE authentication and DTLS. Private,
+overlay, IPv6 and relay candidates are not expanded. Port prediction is a
+bounded attempt, not a guarantee that a particular NAT can be traversed.
+
+The connection form explains remote helper installation and its temporary
+process lifetime. The home card shows the current connection step, including
+helper checks/uploads, address exchange, direct setup and fallback.
+
 Current platform support: Android phone, Linux x86_64/aarch64 computer with
 SFTP and sha256sum. Unsupported computers keep ordinary SSH if fallback is on.
 Credentials rejected by the original SSH server do not trigger P2P fallback.
@@ -40,7 +61,8 @@ SDK environment. `scripts/build_android.sh` invokes this before APK packaging.
 Generated binaries are excluded from Git.
 
 Checks: Go 1.21 `go test -race ./...` in this directory; Flutter tests
-`test/p2p_service_test.dart`, `test/connection_form_p2p_test.dart` and related
+`test/p2p_service_test.dart`, `test/p2p_deployment_test.dart`,
+`test/connection_form_p2p_test.dart` and related
 connection/home tests. The native test transfers multiple TCP streams through
 real loopback ICE peers. Physical-phone connectivity is a separate check and
 can fail on a particular network even when the local transport checks pass.

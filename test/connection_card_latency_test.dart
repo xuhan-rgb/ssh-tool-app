@@ -50,4 +50,18 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('connecting card shows current stage and hides it when finished',
+      (tester) async {
+    for (final connecting in [true, false]) {
+      await tester.pumpWidget(MaterialApp(home: Scaffold(body: ConnectionCard(
+        connection: connection, isConnecting: connecting,
+        connectionProgress: '正在上传远程辅助程序（首次连接或版本更新）…',
+        onTap: () {}, onEdit: () {}, onDelete: () {},
+      ))));
+      expect(find.textContaining('正在上传远程辅助程序'),
+          connecting ? findsOneWidget : findsNothing);
+      expect(tester.takeException(), isNull);
+    }
+  });
+
 }

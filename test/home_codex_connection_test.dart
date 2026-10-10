@@ -16,6 +16,7 @@ import 'package:ssh_tool_app/services/claude_session_service.dart';
 import 'package:ssh_tool_app/services/codex_session_service.dart';
 import 'package:ssh_tool_app/services/codex_setup_service.dart';
 import 'package:ssh_tool_app/services/ssh_service.dart';
+import 'package:ssh_tool_app/services/p2p_service.dart';
 import 'package:ssh_tool_app/services/storage_service.dart';
 
 void main() {
@@ -69,6 +70,7 @@ void main() {
     CodexSessionService.clearCache();
     ClaudeSessionService.runPythonOverride = null;
     SshService.connectClientOverride = null;
+    P2pService.progressNotifier.value = {};
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMessageHandler('flutter/assets', null);
     await Hive.close();
@@ -171,6 +173,9 @@ void main() {
     expect(find.text('Already loaded conversation'), findsNothing);
     expect(find.text('正在连接…'), findsOneWidget);
     expect(find.text('>_ SSH 终端'), findsOneWidget);
+    P2pService.reportProgress(connection.id, '正在尝试 P2P 直连…');
+    await tester.pump();
+    expect(find.text('正在尝试 P2P 直连…'), findsOneWidget);
     await tester.tap(find.text('Recovery host'));
     expect(attempts, 1);
     connecting.complete(TerminalSession(connection.id));

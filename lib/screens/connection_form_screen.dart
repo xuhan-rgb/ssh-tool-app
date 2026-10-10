@@ -297,8 +297,9 @@ class _ConnectionFormScreenState extends State<ConnectionFormScreen> {
   };
 
   List<Widget> _buildP2pOptions() => [
-    const Text('使用原 SSH 连接自动准备 P2P。首次连接会在 Linux 电脑上'
-        '自动放置并启动本 App 的辅助程序，无需手动配置。'),
+    const Text('启用后，首次连接会通过 SSH 在远程 Linux 电脑安装本 App 的 P2P 辅助程序，'
+        '并启动用于直连的临时服务进程。相同版本会复用，不重复上传。'
+        '辅助程序保存在当前账号目录；临时服务随连接结束退出，不设置开机自启。'),
     SwitchListTile(
       contentPadding: EdgeInsets.zero,
       title: const Text('直连失败时保留原连接'),

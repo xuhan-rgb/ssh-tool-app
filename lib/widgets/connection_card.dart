@@ -9,6 +9,7 @@ class ConnectionCard extends StatelessWidget {
   final SshConnection connection;
   final bool isActive;
   final bool isConnecting;
+  final String? connectionProgress;
   final int? latencyMs;
   final String? route;
   final String? fallbackReason;
@@ -23,6 +24,7 @@ class ConnectionCard extends StatelessWidget {
     required this.connection,
     this.isActive = false,
     this.isConnecting = false,
+    this.connectionProgress,
     this.latencyMs,
     this.route,
     this.fallbackReason,
@@ -129,6 +131,11 @@ class ConnectionCard extends StatelessWidget {
                         color: AppTheme.textMuted,
                       ),
                     ),
+                    if (isConnecting && connectionProgress != null) ...[
+                      const SizedBox(height: 4),
+                      Text(connectionProgress!, maxLines: 3,
+                          style: TextStyle(fontSize: 11, color: AppTheme.blue)),
+                    ],
                     if (connection.useP2p) ...[
                       const SizedBox(height: 3),
                       Tooltip(

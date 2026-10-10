@@ -34,11 +34,16 @@ class _P2pLease {
 /// belongs to this app and never reads or changes an existing frp installation.
 class P2pService {
   static final Map<String, SshEndpoint> endpoints = {};
+  static final progressNotifier = ValueNotifier<Map<String, String>>({});
+  static void reportProgress(String id, String message) {
+    progressNotifier.value = {...progressNotifier.value, id: message};
+  }
   static List<Map<String, dynamic>>? lastInterfaces;
   static final Map<String, Map<String, dynamic>> diagnostics = {};
   static const _platform = MethodChannel('ssh_tool_app/p2p');
   static final Map<String, String> _keys = {};
   static final Map<String, _P2pLease> _leases = {};
+  static final Map<String, Future<SshEndpoint>> _resolving = {};
   @visibleForTesting
   static Future<int> Function(Map<String, dynamic>)? startOverride;
 
@@ -61,6 +66,31 @@ class P2pService {
     required bool useP2p,
     Map<String, dynamic>? options,
     List<Map<String, dynamic>>? networkInterfaces,
+  }) {
+    final requestKey = sha256.convert(utf8.encode(jsonEncode(
+        [id, host, port, username, password, useP2p, options, networkInterfaces])))
+        .toString();
+    final existing = _resolving[requestKey];
+    if (existing != null) return existing;
+    late final Future<SshEndpoint> request;
+    request = _resolveConfig(id, host, port,
+        username: username, password: password, useP2p: useP2p,
+        options: options, networkInterfaces: networkInterfaces).whenComplete(() {
+      if (identical(_resolving[requestKey], request)) _resolving.remove(requestKey);
+    });
+    _resolving[requestKey] = request;
+    return request;
+  }
+
+  static Future<SshEndpoint> _resolveConfig(
+    String id,
+    String host,
+    int port, {
+    required String username,
+    required String password,
+    required bool useP2p,
+    Map<String, dynamic>? options,
+    List<Map<String, dynamic>>? networkInterfaces,
   }) async {
     if (!useP2p) {
       final endpoint = SshEndpoint(host, port);
@@ -68,6 +98,7 @@ class P2pService {
       return endpoint;
     }
     diagnostics[id] = {'stage': 'starting'};
+    reportProgress(id, '正在检查已有 P2P 通道…');
     final key = '$id-${sha256.convert(utf8.encode('$host:$port:$username'))}';
     _keys[id] = key;
     SSHClient? bootstrap;
@@ -83,21 +114,25 @@ class P2pService {
         final cached = await _call('P2pLookup', key);
         if (cached['port'] is int) {
           localPort = cached['port'] as int;
+          reportProgress(id, '正在复用已有 P2P 通道…');
         } else {
           _leases.remove(key)?.close();
           diagnostics[id]!['stage'] = 'ssh_auth';
           bootstrapStarted = true;
+          reportProgress(id, '正在连接远程电脑…');
           final socket = await SSHSocket.connect(host, port,
               timeout: const Duration(seconds: 20));
           bootstrap = SSHClient(socket,
               username: username, onPasswordRequest: () => password);
+          reportProgress(id, '正在验证 SSH 账号…');
           // Credential rejection must be reported immediately, not interpreted
           // as a hole-punching failure or retried via fallback.
           await bootstrap.authenticated.timeout(const Duration(seconds: 20));
           bootstrapAuthenticated = true;
           diagnostics[id]!['stage'] = 'deploy_agent';
-          final agent = await _deployAgent(bootstrap);
+          final agent = await deployAgent(bootstrap, connectionId: id);
           diagnostics[id]!['stage'] = 'phone_interfaces';
+          reportProgress(id, '正在获取手机网络地址…');
           final interfaces = networkInterfaces ?? await _collectInterfaces();
           lastInterfaces = interfaces;
           final offer = await _call(
@@ -105,6 +140,7 @@ class P2pService {
           diagnostics[id]!['phoneCandidates'] = _candidateCounts(offer['offer'] as Map);
           diagnostics[id]!['phoneAddresses'] = _candidateAddresses(offer['offer'] as Map);
           diagnostics[id]!['stage'] = 'remote_answer';
+          reportProgress(id, '正在启动远程 P2P 服务并交换地址…');
           command = await bootstrap.execute(_quote(agent.$1));
           command.stderr.listen((_) {});
           final response = command.stdout
@@ -121,10 +157,13 @@ class P2pService {
           diagnostics[id]!['computerCandidates'] = _candidateCounts(answer['answer'] as Map);
           diagnostics[id]!['computerAddresses'] = _candidateAddresses(answer['answer'] as Map);
           diagnostics[id]!['stage'] = 'ice_connect';
+          reportProgress(id, '正在尝试 P2P 直连…');
           final connected = await _call(
               'P2pAnswer', jsonEncode({'id': key, 'answer': answer['answer']}));
           diagnostics[id]!['candidatePair'] = connected['candidatePair'];
           localPort = connected['port'] as int;
+          diagnostics[id]!['stage'] = 'ssh_probe';
+          reportProgress(id, 'P2P 通道已建立，正在检查电脑 SSH 服务…');
           await _probe(localPort);
           final lease = _P2pLease(bootstrap, command);
           _leases[key] = lease;
@@ -165,6 +204,7 @@ class P2pService {
         bootstrap?.close();
         throw Exception('$reason；已关闭原连接回退');
       }
+      reportProgress(id, 'P2P 未成功，正在使用原连接…');
       final endpoint = SshEndpoint(host, port,
           route: '原连接', fallbackReason: reason, authenticatedClient: bootstrap);
       endpoints[id] = endpoint;
@@ -174,10 +214,16 @@ class P2pService {
 
   static String _quote(String value) => "'${value.replaceAll("'", "'\\''")}'";
 
-  static Future<(String, int)> _deployAgent(SSHClient client) async {
+  @visibleForTesting
+  static Future<(String, int)> deployAgent(SSHClient client,
+      {String? connectionId}) async {
+    void progress(String message) {
+      if (connectionId != null) reportProgress(connectionId, message);
+    }
+    progress('正在检查远程辅助程序…');
     final platform = utf8
         .decode(await client
-            .run('uname -s; uname -m; printf \'%s\\n\' "\$SSH_CONNECTION"'))
+            .run('uname -s; uname -m; printf \'%s\\n\' "\$SSH_CONNECTION" "\$HOME"'))
         .trim()
         .split('\n');
     if (platform.length < 2 || platform[0].trim() != 'Linux') {
@@ -198,20 +244,30 @@ class P2pService {
     final bytes =
         asset.buffer.asUint8List(asset.offsetInBytes, asset.lengthInBytes);
     final digest = sha256.convert(bytes).toString();
+    // Check the saved helper before opening a transfer session.
+    final homeHint = platform.length > 3 ? platform[3].trim() : '';
+    String? checkedTarget;
+    if (homeHint.startsWith('/')) {
+      final target = '$homeHint/.ssh_tool/p2p/agent-$digest';
+      checkedTarget = target;
+      if (await _agentMatches(client, target, digest)) {
+        progress('已找到辅助程序，正在复用…');
+        return (target, remotePort);
+      }
+    }
     final sftp = await client.sftp();
     String? stage;
     try {
       final home = await sftp.absolute('.');
       final directory = '$home/.ssh_tool/p2p';
       final target = '$directory/agent-$digest';
-      final check = utf8
-          .decode(await client
-              .run('test -x ${_quote(target)} && sha256sum ${_quote(target)}'))
-          .trim();
-      if (check.startsWith('$digest ')) return (target, remotePort);
+      if (target != checkedTarget && await _agentMatches(client, target, digest)) {
+        return (target, remotePort);
+      }
       await client.run(
           'umask 077; mkdir -p ${_quote(directory)}; chmod 700 ${_quote(directory)}');
       stage = '$target.part-${DateTime.now().microsecondsSinceEpoch}';
+      progress('正在上传远程辅助程序（首次连接或版本更新）…');
       final file = await sftp.open(stage,
           mode: SftpFileOpenMode.write |
               SftpFileOpenMode.create |
@@ -221,6 +277,7 @@ class P2pService {
       } finally {
         await file.close();
       }
+      progress('正在校验并保存远程辅助程序…');
       final installed = utf8.decode(await client.run(
           'test "\$(sha256sum ${_quote(stage)} | cut -d " " -f 1)" = ${_quote(digest)} && '
           'chmod 700 ${_quote(stage)} && mv ${_quote(stage)} ${_quote(target)} && printf ready'));
@@ -233,6 +290,13 @@ class P2pService {
       }
       sftp.close();
     }
+  }
+
+  static Future<bool> _agentMatches(
+      SSHClient client, String target, String digest) async {
+    final check = utf8.decode(await client.run(
+        'test -x ${_quote(target)} && sha256sum ${_quote(target)}')).trim();
+    return check.startsWith('$digest ');
   }
 
   static Map<String, int> _candidateCounts(Map description) {
@@ -282,6 +346,7 @@ class P2pService {
   }
 
   static Future<void> stop(String id) async {
+    progressNotifier.value = Map.of(progressNotifier.value)..remove(id);
     endpoints.remove(id);
     final key = _keys.remove(id);
     if (key == null) return;
