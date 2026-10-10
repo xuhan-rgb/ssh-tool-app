@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
+import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:dartssh2/dartssh2.dart';
 import 'package:ffi/ffi.dart';
@@ -39,6 +40,7 @@ class P2pService {
   static const _platform = MethodChannel('ssh_tool_app/p2p');
   static final Map<String, String> _keys = {};
   static final Map<String, _P2pLease> _leases = {};
+  static final Map<String, Future<SshEndpoint>> _resolving = {};
   @visibleForTesting
   static Future<int> Function(Map<String, dynamic>)? startOverride;
 
@@ -56,6 +58,30 @@ class P2pService {
     String id,
     String host,
     int port, {
+    required String username,
+    required String password,
+    required bool useP2p,
+    Map<String, dynamic>? options,
+    List<Map<String, dynamic>>? networkInterfaces,
+  }) {
+    final requestKey = sha256.convert(utf8.encode(jsonEncode(
+        [id, host, port, username, password, useP2p, options]))).toString();
+    final existing = _resolving[requestKey];
+    if (existing != null) return existing;
+    late final Future<SshEndpoint> request;
+    request = _resolveConfig(id, host, port, username: username,
+        password: password, useP2p: useP2p, options: options,
+        networkInterfaces: networkInterfaces).whenComplete(() {
+      if (identical(_resolving[requestKey], request)) {
+        _resolving.remove(requestKey);
+      }
+    });
+    _resolving[requestKey] = request;
+    return request;
+  }
+
+  static Future<SshEndpoint> _resolveConfig(
+    String id, String host, int port, {
     required String username,
     required String password,
     required bool useP2p,
@@ -96,7 +122,7 @@ class P2pService {
           await bootstrap.authenticated.timeout(const Duration(seconds: 20));
           bootstrapAuthenticated = true;
           diagnostics[id]!['stage'] = 'deploy_agent';
-          final agent = await _deployAgent(bootstrap);
+          final agent = await deployAgent(bootstrap);
           diagnostics[id]!['stage'] = 'phone_interfaces';
           final interfaces = networkInterfaces ?? await _collectInterfaces();
           lastInterfaces = interfaces;
@@ -174,10 +200,11 @@ class P2pService {
 
   static String _quote(String value) => "'${value.replaceAll("'", "'\\''")}'";
 
-  static Future<(String, int)> _deployAgent(SSHClient client) async {
+  @visibleForTesting
+  static Future<(String, int)> deployAgent(SSHClient client) async {
     final platform = utf8
         .decode(await client
-            .run('uname -s; uname -m; printf \'%s\\n\' "\$SSH_CONNECTION"'))
+            .run('uname -s; uname -m; printf \'%s\\n\' "\$SSH_CONNECTION" "\$HOME"').timeout(const Duration(seconds: 8)))
         .trim()
         .split('\n');
     if (platform.length < 2 || platform[0].trim() != 'Linux') {
@@ -198,40 +225,81 @@ class P2pService {
     final bytes =
         asset.buffer.asUint8List(asset.offsetInBytes, asset.lengthInBytes);
     final digest = sha256.convert(bytes).toString();
-    final sftp = await client.sftp();
+    // A verified helper needs no SFTP session, including after an app restart.
+    final homeHint = platform.length > 3 ? platform[3].trim() : '';
+    if (homeHint.startsWith('/')) {
+      final target = '$homeHint/.ssh_tool/p2p/agent-$digest';
+      if (await _agentMatches(client, target, digest)) return (target, remotePort);
+    }
+    final sftp = await client.sftp().timeout(const Duration(seconds: 8));
     String? stage;
     try {
-      final home = await sftp.absolute('.');
+      final home = await sftp.absolute('.').timeout(const Duration(seconds: 5));
       final directory = '$home/.ssh_tool/p2p';
       final target = '$directory/agent-$digest';
-      final check = utf8
-          .decode(await client
-              .run('test -x ${_quote(target)} && sha256sum ${_quote(target)}'))
-          .trim();
-      if (check.startsWith('$digest ')) return (target, remotePort);
+      if (await _agentMatches(client, target, digest)) return (target, remotePort);
       await client.run(
-          'umask 077; mkdir -p ${_quote(directory)}; chmod 700 ${_quote(directory)}');
+          'umask 077; mkdir -p ${_quote(directory)}; chmod 700 ${_quote(directory)}').timeout(const Duration(seconds: 8));
       stage = '$target.part-${DateTime.now().microsecondsSinceEpoch}';
       final file = await sftp.open(stage,
           mode: SftpFileOpenMode.write |
               SftpFileOpenMode.create |
-              SftpFileOpenMode.truncate);
-      try {
-        await file.writeBytes(bytes).timeout(const Duration(seconds: 90));
-      } finally {
-        await file.close();
-      }
+              SftpFileOpenMode.truncate).timeout(const Duration(seconds: 8));
+      await uploadAgentFile(file, bytes);
       final installed = utf8.decode(await client.run(
           'test "\$(sha256sum ${_quote(stage)} | cut -d " " -f 1)" = ${_quote(digest)} && '
-          'chmod 700 ${_quote(stage)} && mv ${_quote(stage)} ${_quote(target)} && printf ready'));
+          'chmod 700 ${_quote(stage)} && mv ${_quote(stage)} ${_quote(target)} && printf ready').timeout(const Duration(seconds: 8)));
       if (installed != 'ready') throw Exception('P2P 辅助程序上传校验失败');
       stage = null;
       return (target, remotePort);
     } finally {
       if (stage != null) {
-        await sftp.remove(stage).catchError((_) {});
+        await sftp.remove(stage).timeout(const Duration(seconds: 3)).catchError((_) {});
       }
-      sftp.close();
+      unawaited(sftp.close().timeout(const Duration(seconds: 3)).catchError((_) {}));
+    }
+  }
+
+  static Future<bool> _agentMatches(
+      SSHClient client, String target, String digest) async {
+    final check = utf8.decode(await client.run(
+        'test -x ${_quote(target)} && sha256sum ${_quote(target)}')
+        .timeout(const Duration(seconds: 8))).trim();
+    return check.startsWith('$digest ');
+  }
+
+  @visibleForTesting
+  static Future<void> uploadAgentFile(SftpFile file, Uint8List bytes,
+      {Duration timeout = const Duration(seconds: 90),
+      Duration cleanupTimeout = const Duration(seconds: 3)}) async {
+    var cancelled = false;
+    var completed = false;
+    Future<void> write() async {
+      // Limit queued writes so timeout cleanup does not sit behind the whole
+      // binary on a slow SSH connection.
+      for (var start = 0; start < bytes.length && !cancelled; start += 1024 * 1024) {
+        final end = (start + 1024 * 1024).clamp(0, bytes.length);
+        final writes = <Future<void>>[];
+        for (var offset = start; offset < end; offset += 64 * 1024) {
+          final chunkEnd = (offset + 64 * 1024).clamp(0, end);
+          writes.add(file.writeBytes(Uint8List.sublistView(bytes, offset, chunkEnd),
+              offset: offset));
+        }
+        await Future.wait(writes);
+      }
+    }
+    try {
+      await write().timeout(timeout, onTimeout: () {
+        cancelled = true;
+        throw TimeoutException('P2P 辅助程序上传超时，已停止上传');
+      });
+      completed = true;
+    } finally {
+      try {
+        await file.close().timeout(cleanupTimeout);
+      } catch (_) {
+        if (completed) rethrow;
+      }
     }
   }
 
