@@ -143,7 +143,7 @@ func (p *Peer) Answer(ctx context.Context, offer webrtc.SessionDescription, port
 			go bridge(conn, stream)
 		})
 	})
-	if err := p.PC.SetRemoteDescription(withPredictedRemotePorts(offer)); err != nil {
+	if err := p.PC.SetRemoteDescription(offer); err != nil {
 		return webrtc.SessionDescription{}, err
 	}
 	answer, err := p.PC.CreateAnswer(nil)
@@ -154,7 +154,7 @@ func (p *Peer) Answer(ctx context.Context, offer webrtc.SessionDescription, port
 }
 
 func (p *Peer) Connect(ctx context.Context, answer webrtc.SessionDescription) (int, error) {
-	if err := p.PC.SetRemoteDescription(withPredictedRemotePorts(answer)); err != nil {
+	if err := p.PC.SetRemoteDescription(answer); err != nil {
 		return 0, err
 	}
 	select {

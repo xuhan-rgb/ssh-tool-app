@@ -34,20 +34,6 @@ Current platform support: Android phone, Linux x86_64/aarch64 computer with
 SFTP and sha256sum. Unsupported computers keep ordinary SSH if fallback is on.
 Credentials rejected by the original SSH server do not trigger P2P fallback.
 
-When the P2P peer is still alive, the app reuses its local listener instead of
-repeating signaling. Concurrent requests in the same Dart isolate share one
-startup. When a new peer is needed, a matching executable and SHA-256 hash in
-the computer's home directory allow deployment to skip SFTP entirely. A missing
-or different helper uses the normal checked upload path. Uploads queue at most
-1 MiB at a time, and write and cleanup timeouts are bounded.
-
-For public IPv4 UDP reflexive candidates, both peers also try at most 32
-subsequent ports. This can handle a NAT that assigns a different nearby port
-for the peer than for the STUN server. The advertised candidate remains
-available; predicted paths must pass the original ICE authentication and DTLS
-handshake. Private, overlay, IPv6 and relay candidates are not expanded. This
-is a bounded connectivity attempt, not a guarantee that NAT ports are predictable.
-
 Build: `scripts/build_p2p.sh`; `P2P_GO_ROOT` can point at a Go 1.21 installation.
 It builds the Linux helpers and three Android ABIs using the existing Docker
 SDK environment. `scripts/build_android.sh` invokes this before APK packaging.
